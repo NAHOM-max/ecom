@@ -99,7 +99,7 @@ func TestOrderWorkflow_PaymentFailure_CompensatesInventory(t *testing.T) {
 	env.OnActivity(paymentActivity.ChargePayment, mock.Anything, mock.Anything).Return(nil, errors.New("payment gateway unavailable"))
 
 	// Mock compensation - release inventory
-	env.OnActivity(inventoryActivity.ReleaseInventory, mock.Anything, "res-123").Return(nil, nil)
+	env.OnActivity(inventoryActivity.ReleaseInventory, mock.Anything, "res-123").Return(nil)
 
 	env.ExecuteWorkflow(OrderWorkflow, OrderWorkflowInput{
 		OrderID:    "order-123",
@@ -153,10 +153,10 @@ func TestOrderWorkflow_ShipmentFailure_CompensatesPaymentAndInventory(t *testing
 	env.OnActivity(shippingActivity.CreateShipment, mock.Anything, mock.Anything).Return(nil, errors.New("shipping service unavailable"))
 
 	// Mock compensation - refund payment
-	env.OnActivity(paymentActivity.RefundPayment, mock.Anything, "pay-456").Return(nil, nil)
+	env.OnActivity(paymentActivity.RefundPayment, mock.Anything, "pay-456").Return(nil)
 
 	// Mock compensation - release inventory
-	env.OnActivity(inventoryActivity.ReleaseInventory, mock.Anything, "res-123").Return(nil, nil)
+	env.OnActivity(inventoryActivity.ReleaseInventory, mock.Anything, "res-123").Return(nil)
 
 	env.ExecuteWorkflow(OrderWorkflow, OrderWorkflowInput{
 		OrderID:    "order-123",
