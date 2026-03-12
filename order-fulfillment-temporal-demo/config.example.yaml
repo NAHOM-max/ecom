@@ -1,0 +1,33 @@
+# Server Configuration
+server:
+  port: "8080"
+  host: "0.0.0.0"
+  read_timeout: 30
+  write_timeout: 30
+  shutdown_timeout: 10
+
+# Temporal Configuration
+temporal:
+  host_port: "localhost:7233"
+  namespace: "default"
+  task_queue: "order-fulfillment"
+
+# Database Configuration
+database:
+  driver: "postgres"
+  host: "localhost"
+  port: 5433
+  database: "orders"
+  username: "orderapp"
+  password: "orderapp"
+  max_open_conns: 25
+  max_idle_conns: 5
+  conn_max_lifetime: 300
+
+# Logger Configuration
+logger:
+  level: "info"
+  environment: "development"
+  output_paths:
+    - "stdout"
+    - "logs/app.log"
