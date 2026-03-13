@@ -236,7 +236,19 @@ func TestShipmentWorkflow_Success(t *testing.T) {
 	}, nil)
 
 	env.ExecuteWorkflow(ShipmentWorkflow, ShipmentWorkflowInput{
-		OrderID:        "order-123",
+		OrderID: "order-123",
+		CustomerAddress: ShippingAddress{
+			Name:       "John Doe",
+			Street:     "456 Oak Ave",
+			City:       "Boston",
+			State:      "MA",
+			PostalCode: "02101",
+			Country:    "USA",
+			Phone:      "555-0200",
+		},
+		Items: []ShipmentItem{
+			{ProductID: "prod-1", Quantity: 2, Weight: 3.5, Description: "Test Product"},
+		},
 		ShippingMethod: "express",
 	})
 

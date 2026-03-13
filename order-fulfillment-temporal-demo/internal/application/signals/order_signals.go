@@ -17,6 +17,9 @@ const (
 	// UpdateOrderSignal sends order updates
 	UpdateOrderSignal = "update-order"
 
+	// UpdateShippingAddressSignal updates shipping address
+	UpdateShippingAddressSignal = "update-shipping-address"
+
 	// PaymentConfirmedSignal notifies payment confirmation from webhook
 	PaymentConfirmedSignal = "payment-confirmed"
 
@@ -29,6 +32,19 @@ type CancelOrderRequest struct {
 	Reason    string
 	RequestBy string
 	Timestamp int64
+}
+
+// UpdateShippingAddressRequest contains shipping address update data
+type UpdateShippingAddressRequest struct {
+	Name       string
+	Street     string
+	City       string
+	State      string
+	PostalCode string
+	Country    string
+	Phone      string
+	UpdatedBy  string
+	Timestamp  int64
 }
 
 // UpdateOrderRequest contains order update data

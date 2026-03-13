@@ -9,6 +9,7 @@ import (
 	"go.temporal.io/sdk/workflow"
 
 	"github.com/yourorg/order-fulfillment-temporal-demo/internal/application/activities"
+	"github.com/yourorg/order-fulfillment-temporal-demo/internal/application/signals"
 )
 
 // OrderWorkflowInput contains the input parameters for order workflow
@@ -43,6 +44,9 @@ type OrderWorkflowState struct {
 	PaymentID         string
 	ShipmentCreated   bool
 	ShipmentID        string
+	ShippingAddress   *ShippingAddress
+	CancelRequested   bool
+	CancelReason      string
 	CompletedSteps    []string
 	LastUpdated       time.Time
 }
@@ -59,9 +63,14 @@ func OrderWorkflow(ctx workflow.Context, input OrderWorkflowInput) (*OrderWorkfl
 		InventoryReserved: false,
 		PaymentCharged:    false,
 		ShipmentCreated:   false,
+		CancelRequested:   false,
 		CompletedSteps:    []string{},
 		LastUpdated:       workflow.Now(ctx),
 	}
+
+	// Setup signal channels
+	cancelChannel := workflow.GetSignalChannel(ctx, signals.CancelOrderSignal)
+	updateAddressChannel := workflow.GetSignalChannel(ctx, signals.UpdateShippingAddressSignal)
 
 	// Configure activity options with retry policy
 	activityOptions := workflow.ActivityOptions{
@@ -80,11 +89,22 @@ func OrderWorkflow(ctx workflow.Context, input OrderWorkflowInput) (*OrderWorkfl
 	state.Status = "RESERVING_INVENTORY"
 	state.LastUpdated = workflow.Now(ctx)
 
+	// Check for cancellation before starting
+	if checkCancellation(ctx, cancelChannel, state, logger) {
+		return &OrderWorkflowResult{
+			OrderID: input.OrderID,
+			Status:  "CANCELLED",
+			Message: state.CancelReason,
+		}, nil
+	}
+
 	var reserveResult activities.ReserveInventoryResult
-	err := workflow.ExecuteActivity(ctx, "ReserveInventory", activities.ReserveInventoryInput{
-		OrderID: input.OrderID,
-		Items:   convertToInventoryItems(input.Items),
-	}).Get(ctx, &reserveResult)
+	err := executeActivityWithSignals(ctx, cancelChannel, updateAddressChannel, state, logger, func() error {
+		return workflow.ExecuteActivity(ctx, "ReserveInventory", activities.ReserveInventoryInput{
+			OrderID: input.OrderID,
+			Items:   convertToInventoryItems(input.Items),
+		}).Get(ctx, &reserveResult)
+	})
 
 	if err != nil {
 		logger.Error("Failed to reserve inventory", "orderID", input.OrderID, "error", err)
@@ -94,6 +114,16 @@ func OrderWorkflow(ctx workflow.Context, input OrderWorkflowInput) (*OrderWorkfl
 			Status:  "FAILED",
 			Message: fmt.Sprintf("Inventory reservation failed: %v", err),
 		}, err
+	}
+
+	// Check if cancelled during activity
+	if state.CancelRequested {
+		logger.Warn("Order cancelled during inventory reservation", "orderID", input.OrderID)
+		return &OrderWorkflowResult{
+			OrderID: input.OrderID,
+			Status:  "CANCELLED",
+			Message: state.CancelReason,
+		}, nil
 	}
 
 	// Check if inventory reservation succeeded (business error)
@@ -118,13 +148,26 @@ func OrderWorkflow(ctx workflow.Context, input OrderWorkflowInput) (*OrderWorkfl
 	state.Status = "CHARGING_PAYMENT"
 	state.LastUpdated = workflow.Now(ctx)
 
+	// Check for cancellation before payment
+	if checkCancellation(ctx, cancelChannel, state, logger) {
+		logger.Warn("Order cancelled before payment, compensating inventory", "orderID", input.OrderID)
+		compensateInventory(ctx, logger, state.ReservationID)
+		return &OrderWorkflowResult{
+			OrderID: input.OrderID,
+			Status:  "CANCELLED",
+			Message: state.CancelReason,
+		}, nil
+	}
+
 	var paymentResult activities.ChargePaymentResult
-	err = workflow.ExecuteActivity(ctx, "ChargePayment", activities.ChargePaymentInput{
-		OrderID:    input.OrderID,
-		CustomerID: input.CustomerID,
-		Amount:     calculateTotal(input.Items),
-		Currency:   "USD",
-	}).Get(ctx, &paymentResult)
+	err = executeActivityWithSignals(ctx, cancelChannel, updateAddressChannel, state, logger, func() error {
+		return workflow.ExecuteActivity(ctx, "ChargePayment", activities.ChargePaymentInput{
+			OrderID:    input.OrderID,
+			CustomerID: input.CustomerID,
+			Amount:     calculateTotal(input.Items),
+			Currency:   "USD",
+		}).Get(ctx, &paymentResult)
+	})
 
 	if err != nil {
 		logger.Error("Payment failed, executing compensation", "orderID", input.OrderID, "error", err)
@@ -136,6 +179,17 @@ func OrderWorkflow(ctx workflow.Context, input OrderWorkflowInput) (*OrderWorkfl
 			Status:  "FAILED",
 			Message: fmt.Sprintf("Payment failed: %v", err),
 		}, err
+	}
+
+	// Check if cancelled during payment
+	if state.CancelRequested {
+		logger.Warn("Order cancelled during payment, compensating", "orderID", input.OrderID)
+		compensateInventory(ctx, logger, state.ReservationID)
+		return &OrderWorkflowResult{
+			OrderID: input.OrderID,
+			Status:  "CANCELLED",
+			Message: state.CancelReason,
+		}, nil
 	}
 
 	// Check if payment succeeded (business error)
@@ -157,10 +211,37 @@ func OrderWorkflow(ctx workflow.Context, input OrderWorkflowInput) (*OrderWorkfl
 	state.LastUpdated = workflow.Now(ctx)
 	logger.Info("Payment charged successfully", "orderID", input.OrderID, "paymentID", paymentResult.PaymentID)
 
-	// Step 3: Create Shipment (Child Workflow)
+	// Step 3: Create Shipment (Child Workflow) - Refactored with Selector
 	logger.Info("Step 3: Creating shipment", "orderID", input.OrderID)
 	state.Status = "CREATING_SHIPMENT"
 	state.LastUpdated = workflow.Now(ctx)
+
+	// Check for cancellation before shipment
+	if checkCancellation(ctx, cancelChannel, state, logger) {
+		logger.Warn("Order cancelled before shipment, compensating payment and inventory", "orderID", input.OrderID)
+		compensatePayment(ctx, logger, state.PaymentID)
+		compensateInventory(ctx, logger, state.ReservationID)
+		return &OrderWorkflowResult{
+			OrderID: input.OrderID,
+			Status:  "CANCELLED",
+			Message: state.CancelReason,
+		}, nil
+	}
+
+	// Use updated shipping address if available
+	shippingAddress := ShippingAddress{
+		Name:       "Customer Name",
+		Street:     "123 Main St",
+		City:       "New York",
+		State:      "NY",
+		PostalCode: "10001",
+		Country:    "USA",
+		Phone:      "555-0100",
+	}
+	if state.ShippingAddress != nil {
+		shippingAddress = *state.ShippingAddress
+		logger.Info("Using updated shipping address", "orderID", input.OrderID, "city", shippingAddress.City)
+	}
 
 	childWorkflowOptions := workflow.ChildWorkflowOptions{
 		WorkflowID: input.OrderID + "-shipment",
@@ -172,12 +253,60 @@ func OrderWorkflow(ctx workflow.Context, input OrderWorkflowInput) (*OrderWorkfl
 	}
 	childCtx := workflow.WithChildOptions(ctx, childWorkflowOptions)
 
+	// Start child workflow without blocking
 	var shipmentResult ShipmentWorkflowResult
-	err = workflow.ExecuteChildWorkflow(childCtx, ShipmentWorkflow, ShipmentWorkflowInput{
-		OrderID:        input.OrderID,
+	childFuture := workflow.ExecuteChildWorkflow(childCtx, ShipmentWorkflow, ShipmentWorkflowInput{
+		OrderID:         input.OrderID,
+		CustomerAddress: shippingAddress,
+		Items: []ShipmentItem{
+			{ProductID: "prod-1", Quantity: 1, Weight: 2.5, Description: "Product"},
+		},
 		ShippingMethod: "standard",
-	}).Get(ctx, &shipmentResult)
+	})
 
+	// Create selector to handle child workflow completion OR cancel signal
+	selector := workflow.NewSelector(ctx)
+
+	// CASE 1: Child workflow completion
+	selector.AddFuture(childFuture, func(f workflow.Future) {
+		err = f.Get(ctx, &shipmentResult)
+	})
+
+	// CASE 2: Cancel signal
+	selector.AddReceive(cancelChannel, func(c workflow.ReceiveChannel, more bool) {
+		var cancelRequest signals.CancelOrderRequest
+		c.Receive(ctx, &cancelRequest)
+
+		state.CancelRequested = true
+		state.CancelReason = fmt.Sprintf(
+			"Order cancelled: %s (by %s)",
+			cancelRequest.Reason,
+			cancelRequest.RequestBy,
+		)
+
+		logger.Warn("Cancel signal received during shipment",
+			"reason", cancelRequest.Reason,
+			"requestBy", cancelRequest.RequestBy)
+
+		err = temporal.NewCanceledError("order cancelled")
+	})
+
+	// Wait for either child workflow completion or cancel signal
+	selector.Select(ctx)
+
+	// Handle cancellation
+	if state.CancelRequested {
+		logger.Warn("Order cancelled during shipment, compensating payment and inventory", "orderID", input.OrderID)
+		compensatePayment(ctx, logger, state.PaymentID)
+		compensateInventory(ctx, logger, state.ReservationID)
+		return &OrderWorkflowResult{
+			OrderID: input.OrderID,
+			Status:  "CANCELLED",
+			Message: state.CancelReason,
+		}, nil
+	}
+
+	// Handle shipment errors
 	if err != nil {
 		logger.Error("Shipment creation failed, executing compensation", "orderID", input.OrderID, "error", err)
 		// Compensation: Refund payment and release inventory
@@ -299,4 +428,86 @@ func calculateTotal(items []OrderItemInput) float64 {
 		total += float64(item.Quantity) * item.Price
 	}
 	return total
+}
+
+// checkCancellation checks for pending cancellation signals (non-blocking)
+func checkCancellation(ctx workflow.Context, cancelChannel workflow.ReceiveChannel, state *OrderWorkflowState, logger log.Logger) bool {
+	var cancelRequest signals.CancelOrderRequest
+	if cancelChannel.ReceiveAsync(&cancelRequest) {
+		state.CancelRequested = true
+		state.CancelReason = fmt.Sprintf("Order cancelled: %s (by %s)", cancelRequest.Reason, cancelRequest.RequestBy)
+		logger.Warn("Cancel signal received",
+			"reason", cancelRequest.Reason,
+			"requestBy", cancelRequest.RequestBy,
+			"timestamp", cancelRequest.Timestamp)
+		return true
+	}
+	return false
+}
+
+// executeActivityWithSignals executes an activity while listening for signals
+func executeActivityWithSignals(
+	ctx workflow.Context,
+	cancelChannel workflow.ReceiveChannel,
+	updateAddressChannel workflow.ReceiveChannel,
+	state *OrderWorkflowState,
+	logger log.Logger,
+	activityFunc func() error,
+) error {
+	// Check for signals before executing activity (non-blocking)
+	var cancelRequest signals.CancelOrderRequest
+	if cancelChannel.ReceiveAsync(&cancelRequest) {
+		state.CancelRequested = true
+		state.CancelReason = fmt.Sprintf("Order cancelled: %s (by %s)", cancelRequest.Reason, cancelRequest.RequestBy)
+		logger.Warn("Cancel signal received before activity",
+			"reason", cancelRequest.Reason,
+			"requestBy", cancelRequest.RequestBy)
+	}
+
+	var updateRequest signals.UpdateShippingAddressRequest
+	if updateAddressChannel.ReceiveAsync(&updateRequest) {
+		state.ShippingAddress = &ShippingAddress{
+			Name:       updateRequest.Name,
+			Street:     updateRequest.Street,
+			City:       updateRequest.City,
+			State:      updateRequest.State,
+			PostalCode: updateRequest.PostalCode,
+			Country:    updateRequest.Country,
+			Phone:      updateRequest.Phone,
+		}
+		state.LastUpdated = workflow.Now(ctx)
+		logger.Info("Shipping address updated",
+			"city", updateRequest.City,
+			"state", updateRequest.State)
+	}
+
+	// Execute the activity
+	err := activityFunc()
+
+	// Check for signals after activity completes (non-blocking)
+	if cancelChannel.ReceiveAsync(&cancelRequest) {
+		state.CancelRequested = true
+		state.CancelReason = fmt.Sprintf("Order cancelled: %s (by %s)", cancelRequest.Reason, cancelRequest.RequestBy)
+		logger.Warn("Cancel signal received after activity",
+			"reason", cancelRequest.Reason,
+			"requestBy", cancelRequest.RequestBy)
+	}
+
+	if updateAddressChannel.ReceiveAsync(&updateRequest) {
+		state.ShippingAddress = &ShippingAddress{
+			Name:       updateRequest.Name,
+			Street:     updateRequest.Street,
+			City:       updateRequest.City,
+			State:      updateRequest.State,
+			PostalCode: updateRequest.PostalCode,
+			Country:    updateRequest.Country,
+			Phone:      updateRequest.Phone,
+		}
+		state.LastUpdated = workflow.Now(ctx)
+		logger.Info("Shipping address updated",
+			"city", updateRequest.City,
+			"state", updateRequest.State)
+	}
+
+	return err
 }
