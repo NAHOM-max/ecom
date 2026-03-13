@@ -253,9 +253,12 @@ func OrderWorkflow(ctx workflow.Context, input OrderWorkflowInput) (*OrderWorkfl
 	}
 	childCtx := workflow.WithChildOptions(ctx, childWorkflowOptions)
 
+	// Create cancelable context for child workflow
+	ctxWithCancel, cancelHandler := workflow.WithCancel(childCtx)
+
 	// Start child workflow without blocking
 	var shipmentResult ShipmentWorkflowResult
-	childFuture := workflow.ExecuteChildWorkflow(childCtx, ShipmentWorkflow, ShipmentWorkflowInput{
+	childFuture := workflow.ExecuteChildWorkflow(ctxWithCancel, ShipmentWorkflow, ShipmentWorkflowInput{
 		OrderID:         input.OrderID,
 		CustomerAddress: shippingAddress,
 		Items: []ShipmentItem{
@@ -288,6 +291,8 @@ func OrderWorkflow(ctx workflow.Context, input OrderWorkflowInput) (*OrderWorkfl
 			"reason", cancelRequest.Reason,
 			"requestBy", cancelRequest.RequestBy)
 
+		// Cancel the child workflow immediately
+		cancelHandler()
 		err = temporal.NewCanceledError("order cancelled")
 	})
 
@@ -365,7 +370,9 @@ func OrderWorkflow(ctx workflow.Context, input OrderWorkflowInput) (*OrderWorkfl
 func compensateInventory(ctx workflow.Context, logger log.Logger, reservationID string) {
 	logger.Warn("Compensating: Releasing inventory", "reservationID", reservationID)
 
-	// Use separate context for compensation with its own timeout
+	// Use disconnected context to ensure compensation runs even if workflow is cancelled
+	compCtx, _ := workflow.NewDisconnectedContext(ctx)
+
 	compensationOptions := workflow.ActivityOptions{
 		StartToCloseTimeout: time.Minute * 3,
 		RetryPolicy: &temporal.RetryPolicy{
@@ -374,9 +381,9 @@ func compensateInventory(ctx workflow.Context, logger log.Logger, reservationID 
 			MaximumAttempts:    5,
 		},
 	}
-	compensationCtx := workflow.WithActivityOptions(ctx, compensationOptions)
+	compCtx = workflow.WithActivityOptions(compCtx, compensationOptions)
 
-	err := workflow.ExecuteActivity(compensationCtx, "ReleaseInventory", reservationID).Get(ctx, nil)
+	err := workflow.ExecuteActivity(compCtx, "ReleaseInventory", reservationID).Get(compCtx, nil)
 	if err != nil {
 		logger.Error("Failed to release inventory during compensation", "reservationID", reservationID, "error", err)
 		// In production, this might trigger an alert or manual intervention
@@ -389,7 +396,9 @@ func compensateInventory(ctx workflow.Context, logger log.Logger, reservationID 
 func compensatePayment(ctx workflow.Context, logger log.Logger, paymentID string) {
 	logger.Warn("Compensating: Refunding payment", "paymentID", paymentID)
 
-	// Use separate context for compensation with its own timeout
+	// Use disconnected context to ensure compensation runs even if workflow is cancelled
+	compCtx, _ := workflow.NewDisconnectedContext(ctx)
+
 	compensationOptions := workflow.ActivityOptions{
 		StartToCloseTimeout: time.Minute * 3,
 		RetryPolicy: &temporal.RetryPolicy{
@@ -398,9 +407,9 @@ func compensatePayment(ctx workflow.Context, logger log.Logger, paymentID string
 			MaximumAttempts:    5,
 		},
 	}
-	compensationCtx := workflow.WithActivityOptions(ctx, compensationOptions)
+	compCtx = workflow.WithActivityOptions(compCtx, compensationOptions)
 
-	err := workflow.ExecuteActivity(compensationCtx, "RefundPayment", paymentID).Get(ctx, nil)
+	err := workflow.ExecuteActivity(compCtx, "RefundPayment", paymentID).Get(compCtx, nil)
 	if err != nil {
 		logger.Error("Failed to refund payment during compensation", "paymentID", paymentID, "error", err)
 		// In production, this might trigger an alert or manual intervention
