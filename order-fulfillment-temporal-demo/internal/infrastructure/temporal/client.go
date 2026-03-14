@@ -6,6 +6,8 @@ import (
 	"log"
 
 	"go.temporal.io/sdk/client"
+
+	"github.com/yourorg/order-fulfillment-temporal-demo/internal/application/queries"
 )
 
 // Task queue constants
@@ -63,6 +65,21 @@ func (c *Client) ExecuteWorkflow(ctx context.Context, workflowID string, workflo
 // SignalWorkflow sends a signal to a running workflow
 func (c *Client) SignalWorkflow(ctx context.Context, workflowID string, runID string, signalName string, arg interface{}) error {
 	return c.client.SignalWorkflow(ctx, workflowID, runID, signalName, arg)
+}
+
+// QueryOrderStatus queries a running workflow for the order_status query
+func (c *Client) QueryOrderStatus(ctx context.Context, workflowID string) (*queries.OrderStatusResult, error) {
+	resp, err := c.client.QueryWorkflow(ctx, workflowID, "", queries.OrderStatusQuery)
+	if err != nil {
+		return nil, fmt.Errorf("query order_status failed for workflow %s: %w", workflowID, err)
+	}
+
+	var result queries.OrderStatusResult
+	if err := resp.Get(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode order_status response: %w", err)
+	}
+
+	return &result, nil
 }
 
 // QueryWorkflow queries a running workflow

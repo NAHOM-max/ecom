@@ -9,6 +9,7 @@ import (
 	"go.temporal.io/sdk/workflow"
 
 	"github.com/yourorg/order-fulfillment-temporal-demo/internal/application/activities"
+	"github.com/yourorg/order-fulfillment-temporal-demo/internal/application/queries"
 	"github.com/yourorg/order-fulfillment-temporal-demo/internal/application/signals"
 )
 
@@ -66,6 +67,18 @@ func OrderWorkflow(ctx workflow.Context, input OrderWorkflowInput) (*OrderWorkfl
 		CancelRequested:   false,
 		CompletedSteps:    []string{},
 		LastUpdated:       workflow.Now(ctx),
+	}
+
+	// Register order_status query handler
+	if err := workflow.SetQueryHandler(ctx, queries.OrderStatusQuery, func() (queries.OrderStatusResult, error) {
+		return queries.OrderStatusResult{
+			OrderID:        state.OrderID,
+			CurrentStatus:  state.Status,
+			PaymentStatus:  paymentStatus(state),
+			ShipmentStatus: shipmentStatus(state),
+		}, nil
+	}); err != nil {
+		return nil, fmt.Errorf("failed to register order_status query handler: %w", err)
 	}
 
 	// Setup signal channels
@@ -267,12 +280,15 @@ func OrderWorkflow(ctx workflow.Context, input OrderWorkflowInput) (*OrderWorkfl
 		ShippingMethod: "standard",
 	})
 
-	// Create selector to handle child workflow completion OR cancel signal
+	// Create selector to handle child workflow completion, cancel signal, or address update
 	selector := workflow.NewSelector(ctx)
+
+	shipmentDone := false
 
 	// CASE 1: Child workflow completion
 	selector.AddFuture(childFuture, func(f workflow.Future) {
 		err = f.Get(ctx, &shipmentResult)
+		shipmentDone = true
 	})
 
 	// CASE 2: Cancel signal
@@ -296,14 +312,38 @@ func OrderWorkflow(ctx workflow.Context, input OrderWorkflowInput) (*OrderWorkfl
 		err = temporal.NewCanceledError("order cancelled")
 	})
 
-	// Wait for either child workflow completion or cancel signal
-	selector.Select(ctx)
+	// CASE 3: Address update signal — drain all pending updates, keep the latest
+	selector.AddReceive(updateAddressChannel, func(c workflow.ReceiveChannel, more bool) {
+		var updateRequest signals.UpdateShippingAddressRequest
+		for c.ReceiveAsync(&updateRequest) {
+			state.ShippingAddress = &ShippingAddress{
+				Name:       updateRequest.Name,
+				Street:     updateRequest.Street,
+				City:       updateRequest.City,
+				State:      updateRequest.State,
+				PostalCode: updateRequest.PostalCode,
+				Country:    updateRequest.Country,
+				Phone:      updateRequest.Phone,
+			}
+			state.LastUpdated = workflow.Now(ctx)
+			logger.Info("Shipping address updated during shipment",
+				"city", updateRequest.City,
+				"state", updateRequest.State)
+		}
+	})
+
+	// Loop until child workflow completes or cancel signal is received.
+	// Address updates re-arm the selector so they are never left unhandled.
+	for !shipmentDone && !state.CancelRequested {
+		selector.Select(ctx)
+	}
 
 	// Handle cancellation
 	if state.CancelRequested {
 		logger.Warn("Order cancelled during shipment, compensating payment and inventory", "orderID", input.OrderID)
 		compensatePayment(ctx, logger, state.PaymentID)
 		compensateInventory(ctx, logger, state.ReservationID)
+		state.Status = "CANCELLED"
 		return &OrderWorkflowResult{
 			OrderID: input.OrderID,
 			Status:  "CANCELLED",
@@ -437,6 +477,34 @@ func calculateTotal(items []OrderItemInput) float64 {
 		total += float64(item.Quantity) * item.Price
 	}
 	return total
+}
+
+// paymentStatus derives a readable payment status from workflow state
+func paymentStatus(state *OrderWorkflowState) string {
+	switch {
+	case state.CancelRequested && state.PaymentCharged:
+		return "refunded"
+	case state.PaymentCharged:
+		return "charged"
+	case state.Status == "CHARGING_PAYMENT":
+		return "pending"
+	default:
+		return "not_started"
+	}
+}
+
+// shipmentStatus derives a readable shipment status from workflow state
+func shipmentStatus(state *OrderWorkflowState) string {
+	switch {
+	case state.CancelRequested && state.ShipmentCreated:
+		return "cancelled"
+	case state.ShipmentCreated:
+		return "created"
+	case state.Status == "CREATING_SHIPMENT":
+		return "pending"
+	default:
+		return "not_started"
+	}
 }
 
 // checkCancellation checks for pending cancellation signals (non-blocking)

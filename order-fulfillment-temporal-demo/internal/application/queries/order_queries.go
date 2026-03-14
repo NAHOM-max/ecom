@@ -11,6 +11,9 @@ package queries
 
 // Query names as constants for type safety
 const (
+	// OrderStatusQuery is the query name exposed to the API layer
+	OrderStatusQuery = "order_status"
+
 	// GetOrderStatusQuery retrieves current order status
 	GetOrderStatusQuery = "get-order-status"
 
@@ -23,6 +26,14 @@ const (
 	// GetCompletedStepsQuery retrieves list of completed steps
 	GetCompletedStepsQuery = "get-completed-steps"
 )
+
+// OrderStatusResult is the response returned by the order_status query
+type OrderStatusResult struct {
+	OrderID        string `json:"order_id"`
+	CurrentStatus  string `json:"current_status"`
+	PaymentStatus  string `json:"payment_status"`
+	ShipmentStatus string `json:"shipment_status"`
+}
 
 // OrderStatusResponse contains order status information
 type OrderStatusResponse struct {

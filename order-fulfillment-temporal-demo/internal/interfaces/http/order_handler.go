@@ -1,31 +1,42 @@
 package http
 
-// OrderHandler handles HTTP requests for order operations
-// Responsibilities:
-// - Parse HTTP requests
-// - Validate input
-// - Start workflows via Temporal client
-// - Send signals to workflows
-// - Query workflow state
-// - Return HTTP responses
-
 import (
+	"net/http"
+
 	"github.com/gin-gonic/gin"
+
+	temporal "github.com/yourorg/order-fulfillment-temporal-demo/internal/infrastructure/temporal"
 )
 
-// OrderHandler handles order-related HTTP requests
+// OrderHandler handles HTTP requests for order operations
 type OrderHandler struct {
-	// TODO: Add Temporal client
-	// TODO: Add order service
-	// TODO: Add logger
+	temporalClient *temporal.Client
 }
 
 // NewOrderHandler creates a new order handler
-func NewOrderHandler() *OrderHandler {
-	return &OrderHandler{}
+func NewOrderHandler(temporalClient *temporal.Client) *OrderHandler {
+	return &OrderHandler{temporalClient: temporalClient}
 }
 
-// CreateOrder handles POST /orders - creates a new order and starts workflow
+// GetOrderStatus handles GET /orders/:id/status
+// Queries the running workflow using the order_status query and returns the result.
+func (h *OrderHandler) GetOrderStatus(c *gin.Context) {
+	orderID := c.Param("id")
+	if orderID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "order_id is required"})
+		return
+	}
+
+	result, err := h.temporalClient.QueryOrderStatus(c.Request.Context(), orderID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, result)
+}
+
+// CreateOrder handles POST /orders
 func (h *OrderHandler) CreateOrder(c *gin.Context) {
 	// TODO: Parse request body
 	// TODO: Validate input
@@ -33,14 +44,14 @@ func (h *OrderHandler) CreateOrder(c *gin.Context) {
 	// TODO: Return workflow ID and run ID
 }
 
-// GetOrder handles GET /orders/:id - retrieves order status via query
+// GetOrder handles GET /orders/:id
 func (h *OrderHandler) GetOrder(c *gin.Context) {
 	// TODO: Get order ID from path
 	// TODO: Query workflow state
 	// TODO: Return order status
 }
 
-// CancelOrder handles POST /orders/:id/cancel - sends cancel signal
+// CancelOrder handles POST /orders/:id/cancel
 func (h *OrderHandler) CancelOrder(c *gin.Context) {
 	// TODO: Get order ID from path
 	// TODO: Parse cancellation reason
@@ -48,7 +59,7 @@ func (h *OrderHandler) CancelOrder(c *gin.Context) {
 	// TODO: Return success response
 }
 
-// UpdateOrder handles PATCH /orders/:id - sends update signal
+// UpdateOrder handles PATCH /orders/:id
 func (h *OrderHandler) UpdateOrder(c *gin.Context) {
 	// TODO: Get order ID from path
 	// TODO: Parse update data
@@ -56,21 +67,14 @@ func (h *OrderHandler) UpdateOrder(c *gin.Context) {
 	// TODO: Return success response
 }
 
-// GetOrderStatus handles GET /orders/:id/status - queries workflow status
-func (h *OrderHandler) GetOrderStatus(c *gin.Context) {
-	// TODO: Get order ID from path
-	// TODO: Query workflow for status
-	// TODO: Return status response
-}
-
-// ListOrders handles GET /orders - lists orders with filters
+// ListOrders handles GET /orders
 func (h *OrderHandler) ListOrders(c *gin.Context) {
 	// TODO: Parse query parameters
 	// TODO: Query repository for orders
 	// TODO: Return orders list
 }
 
-// GetOrderProgress handles GET /orders/:id/progress - queries workflow progress
+// GetOrderProgress handles GET /orders/:id/progress
 func (h *OrderHandler) GetOrderProgress(c *gin.Context) {
 	// TODO: Get order ID from path
 	// TODO: Query workflow for progress
