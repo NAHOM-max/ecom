@@ -48,6 +48,7 @@ func (r *Router) Setup() {
 			orders.POST("/:id/cancel", r.orderHandler.CancelOrder)
 			orders.GET("/:id/status", r.orderHandler.GetOrderStatus)
 			orders.GET("/:id/progress", r.orderHandler.GetOrderProgress)
+			orders.PATCH("/:id/priority", r.orderHandler.SetOrderPriority)
 		}
 	}
 }

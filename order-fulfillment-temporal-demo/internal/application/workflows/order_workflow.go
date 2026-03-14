@@ -11,6 +11,7 @@ import (
 	"github.com/yourorg/order-fulfillment-temporal-demo/internal/application/activities"
 	"github.com/yourorg/order-fulfillment-temporal-demo/internal/application/queries"
 	"github.com/yourorg/order-fulfillment-temporal-demo/internal/application/signals"
+	"github.com/yourorg/order-fulfillment-temporal-demo/internal/application/updates"
 )
 
 // OrderWorkflowInput contains the input parameters for order workflow
@@ -39,6 +40,7 @@ type OrderWorkflowResult struct {
 type OrderWorkflowState struct {
 	OrderID           string
 	Status            string
+	Priority          updates.OrderPriority
 	InventoryReserved bool
 	ReservationID     string
 	PaymentCharged    bool
@@ -61,6 +63,7 @@ func OrderWorkflow(ctx workflow.Context, input OrderWorkflowInput) (*OrderWorkfl
 	state := &OrderWorkflowState{
 		OrderID:           input.OrderID,
 		Status:            "PROCESSING",
+		Priority:          updates.PriorityNormal,
 		InventoryReserved: false,
 		PaymentCharged:    false,
 		ShipmentCreated:   false,
@@ -76,9 +79,41 @@ func OrderWorkflow(ctx workflow.Context, input OrderWorkflowInput) (*OrderWorkfl
 			CurrentStatus:  state.Status,
 			PaymentStatus:  paymentStatus(state),
 			ShipmentStatus: shipmentStatus(state),
+			Priority:       string(state.Priority),
 		}, nil
 	}); err != nil {
 		return nil, fmt.Errorf("failed to register order_status query handler: %w", err)
+	}
+
+	// Register set_priority update handler
+	// The validator runs before the handler; a non-nil error rejects the update
+	// without modifying state, giving the caller a synchronous rejection.
+	if err := workflow.SetUpdateHandlerWithOptions(
+		ctx,
+		updates.SetPriorityUpdate,
+		func(ctx workflow.Context, input updates.SetPriorityInput) (updates.SetPriorityResult, error) {
+			old := state.Priority
+			state.Priority = input.Priority
+			state.LastUpdated = workflow.Now(ctx)
+			logger.Info("Order priority updated",
+				"orderID", state.OrderID,
+				"oldPriority", old,
+				"newPriority", input.Priority,
+				"updatedBy", input.UpdatedBy,
+			)
+			return updates.SetPriorityResult{
+				OrderID:     state.OrderID,
+				OldPriority: old,
+				NewPriority: input.Priority,
+			}, nil
+		},
+		workflow.UpdateHandlerOptions{
+			Validator: func(ctx workflow.Context, input updates.SetPriorityInput) error {
+				return input.Priority.Validate()
+			},
+		},
+	); err != nil {
+		return nil, fmt.Errorf("failed to register set_priority update handler: %w", err)
 	}
 
 	// Setup signal channels

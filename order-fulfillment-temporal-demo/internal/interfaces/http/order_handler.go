@@ -6,6 +6,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	temporal "github.com/yourorg/order-fulfillment-temporal-demo/internal/infrastructure/temporal"
+	"github.com/yourorg/order-fulfillment-temporal-demo/internal/application/updates"
 )
 
 // OrderHandler handles HTTP requests for order operations
@@ -16,6 +17,35 @@ type OrderHandler struct {
 // NewOrderHandler creates a new order handler
 func NewOrderHandler(temporalClient *temporal.Client) *OrderHandler {
 	return &OrderHandler{temporalClient: temporalClient}
+}
+
+// SetOrderPriority handles PATCH /orders/:id/priority
+// Sends a set_priority update to the running workflow and returns the result.
+func (h *OrderHandler) SetOrderPriority(c *gin.Context) {
+	orderID := c.Param("id")
+	if orderID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "order_id is required"})
+		return
+	}
+
+	var input updates.SetPriorityInput
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if err := input.Priority.Validate(); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	result, err := h.temporalClient.UpdateOrderPriority(c.Request.Context(), orderID, input)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, result)
 }
 
 // GetOrderStatus handles GET /orders/:id/status

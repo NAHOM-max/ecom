@@ -8,6 +8,7 @@ import (
 	"go.temporal.io/sdk/client"
 
 	"github.com/yourorg/order-fulfillment-temporal-demo/internal/application/queries"
+	"github.com/yourorg/order-fulfillment-temporal-demo/internal/application/updates"
 )
 
 // Task queue constants
@@ -65,6 +66,22 @@ func (c *Client) ExecuteWorkflow(ctx context.Context, workflowID string, workflo
 // SignalWorkflow sends a signal to a running workflow
 func (c *Client) SignalWorkflow(ctx context.Context, workflowID string, runID string, signalName string, arg interface{}) error {
 	return c.client.SignalWorkflow(ctx, workflowID, runID, signalName, arg)
+}
+
+// UpdateOrderPriority sends a set_priority update to a running workflow and
+// blocks until the update is accepted and applied.
+func (c *Client) UpdateOrderPriority(ctx context.Context, workflowID string, input updates.SetPriorityInput) (*updates.SetPriorityResult, error) {
+	handle, err := c.client.UpdateWorkflow(ctx, workflowID, "", updates.SetPriorityUpdate, input)
+	if err != nil {
+		return nil, fmt.Errorf("set_priority update failed for workflow %s: %w", workflowID, err)
+	}
+
+	var result updates.SetPriorityResult
+	if err := handle.Get(ctx, &result); err != nil {
+		return nil, fmt.Errorf("set_priority update rejected: %w", err)
+	}
+
+	return &result, nil
 }
 
 // QueryOrderStatus queries a running workflow for the order_status query

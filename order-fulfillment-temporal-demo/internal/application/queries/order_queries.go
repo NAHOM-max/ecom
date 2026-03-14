@@ -33,6 +33,7 @@ type OrderStatusResult struct {
 	CurrentStatus  string `json:"current_status"`
 	PaymentStatus  string `json:"payment_status"`
 	ShipmentStatus string `json:"shipment_status"`
+	Priority       string `json:"priority"`
 }
 
 // OrderStatusResponse contains order status information
