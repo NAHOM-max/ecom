@@ -7,18 +7,19 @@ import (
 	"time"
 
 	"go.temporal.io/sdk/activity"
+
+	"github.com/yourorg/order-fulfillment-temporal-demo/internal/infrastructure/messaging"
 )
 
 // InventoryActivity simulates inventory service operations
 type InventoryActivity struct {
-	failureRate float64 // Probability of failure (0.0 to 1.0)
+	failureRate float64
+	producer    messaging.EventProducer
 }
 
 // NewInventoryActivity creates a new inventory activity
-func NewInventoryActivity(failureRate float64) *InventoryActivity {
-	return &InventoryActivity{
-		failureRate: failureRate,
-	}
+func NewInventoryActivity(failureRate float64, producer messaging.EventProducer) *InventoryActivity {
+	return &InventoryActivity{failureRate: failureRate, producer: producer}
 }
 
 // ReserveInventoryInput contains parameters for inventory reservation
@@ -89,6 +90,17 @@ func (a *InventoryActivity) ReserveInventory(ctx context.Context, input ReserveI
 		"orderID", input.OrderID,
 		"reservationID", reservationID,
 		"itemCount", len(input.Items))
+
+	_ = a.producer.Publish(messaging.TopicInventory, messaging.Event{
+		EventID:   fmt.Sprintf("evt-%s", reservationID),
+		EventType: messaging.EventInventoryReserved,
+		Timestamp: time.Now(),
+		OrderID:   input.OrderID,
+		Payload: messaging.InventoryReservedPayload{
+			ReservationID: reservationID,
+			ItemCount:     len(input.Items),
+		},
+	})
 
 	return &ReserveInventoryResult{
 		ReservationID: reservationID,

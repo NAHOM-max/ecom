@@ -7,18 +7,19 @@ import (
 	"time"
 
 	"go.temporal.io/sdk/activity"
+
+	"github.com/yourorg/order-fulfillment-temporal-demo/internal/infrastructure/messaging"
 )
 
 // PaymentActivity simulates payment service operations
 type PaymentActivity struct {
-	failureRate float64 // Probability of failure (0.0 to 1.0)
+	failureRate float64
+	producer    messaging.EventProducer
 }
 
 // NewPaymentActivity creates a new payment activity
-func NewPaymentActivity(failureRate float64) *PaymentActivity {
-	return &PaymentActivity{
-		failureRate: failureRate,
-	}
+func NewPaymentActivity(failureRate float64, producer messaging.EventProducer) *PaymentActivity {
+	return &PaymentActivity{failureRate: failureRate, producer: producer}
 }
 
 // ChargePaymentInput contains payment processing parameters
@@ -114,6 +115,19 @@ func (a *PaymentActivity) ChargePayment(ctx context.Context, input ChargePayment
 		"paymentID", paymentID,
 		"transactionID", transactionID,
 		"amount", input.Amount)
+
+	_ = a.producer.Publish(messaging.TopicPayments, messaging.Event{
+		EventID:   fmt.Sprintf("evt-%s", paymentID),
+		EventType: messaging.EventPaymentCharged,
+		Timestamp: time.Now(),
+		OrderID:   input.OrderID,
+		Payload: messaging.PaymentChargedPayload{
+			PaymentID:     paymentID,
+			TransactionID: transactionID,
+			Amount:        input.Amount,
+			Currency:      input.Currency,
+		},
+	})
 
 	return &ChargePaymentResult{
 		PaymentID:     paymentID,

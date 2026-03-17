@@ -7,18 +7,19 @@ import (
 	"time"
 
 	"go.temporal.io/sdk/activity"
+
+	"github.com/yourorg/order-fulfillment-temporal-demo/internal/infrastructure/messaging"
 )
 
 // ShippingActivity simulates shipping service operations
 type ShippingActivity struct {
-	failureRate float64 // Probability of failure (0.0 to 1.0)
+	failureRate float64
+	producer    messaging.EventProducer
 }
 
 // NewShippingActivity creates a new shipping activity
-func NewShippingActivity(failureRate float64) *ShippingActivity {
-	return &ShippingActivity{
-		failureRate: failureRate,
-	}
+func NewShippingActivity(failureRate float64, producer messaging.EventProducer) *ShippingActivity {
+	return &ShippingActivity{failureRate: failureRate, producer: producer}
 }
 
 // CreateShipmentInput contains shipment creation parameters
@@ -143,6 +144,19 @@ func (a *ShippingActivity) CreateShipment(ctx context.Context, input CreateShipm
 		"trackingNumber", trackingNumber,
 		"carrier", carrier,
 		"estimatedDate", estimatedDate)
+
+	_ = a.producer.Publish(messaging.TopicShipments, messaging.Event{
+		EventID:   fmt.Sprintf("evt-%s", shipmentID),
+		EventType: messaging.EventShipmentCreated,
+		Timestamp: time.Now(),
+		OrderID:   input.OrderID,
+		Payload: messaging.ShipmentCreatedPayload{
+			ShipmentID:     shipmentID,
+			TrackingNumber: trackingNumber,
+			Carrier:        carrier,
+			EstimatedDate:  estimatedDate,
+		},
+	})
 
 	return &CreateShipmentResult{
 		ShipmentID:     shipmentID,
