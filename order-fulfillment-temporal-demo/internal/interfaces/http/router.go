@@ -1,70 +1,30 @@
 package http
 
-// Router configures HTTP routes and middleware
-// Responsibilities:
-// - Setup Gin router
-// - Register routes
-// - Configure middleware (logging, CORS, auth, etc.)
-// - Health check endpoints
-
 import (
-	"github.com/gin-gonic/gin"
+	"net/http"
 )
 
-// Router wraps the Gin engine with application routes
-type Router struct {
-	engine       *gin.Engine
-	orderHandler *OrderHandler
-}
+// NewRouter builds and returns an http.Handler with all order routes registered.
+//
+// Routes:
+//
+//	POST   /orders                      → CreateOrder
+//	GET    /orders/{id}/status          → GetOrderStatus
+//	POST   /orders/{id}/cancel          → CancelOrder
+//	POST   /orders/{id}/priority        → SetOrderPriority
+//	POST   /orders/{id}/change_address  → ChangeAddress
+func NewRouter(h *OrderHandler) http.Handler {
+	mux := http.NewServeMux()
 
-// NewRouter creates a new HTTP router
-func NewRouter(orderHandler *OrderHandler) *Router {
-	return &Router{
-		engine:       gin.Default(),
-		orderHandler: orderHandler,
-	}
-}
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	})
 
-// Setup configures all routes and middleware
-func (r *Router) Setup() {
-	// TODO: Configure middleware
-	// TODO: Setup CORS
-	// TODO: Setup logging
-	// TODO: Setup recovery
+	mux.HandleFunc("POST /orders", h.CreateOrder)
+	mux.HandleFunc("GET /orders/{id}/status", h.GetOrderStatus)
+	mux.HandleFunc("POST /orders/{id}/cancel", h.CancelOrder)
+	mux.HandleFunc("POST /orders/{id}/priority", h.SetOrderPriority)
+	mux.HandleFunc("POST /orders/{id}/change_address", h.ChangeAddress)
 
-	// Health check
-	r.engine.GET("/health", r.healthCheck)
-
-	// API v1 routes
-	v1 := r.engine.Group("/api/v1")
-	{
-		// Order routes
-		orders := v1.Group("/orders")
-		{
-			orders.POST("", r.orderHandler.CreateOrder)
-			orders.GET("", r.orderHandler.ListOrders)
-			orders.GET("/:id", r.orderHandler.GetOrder)
-			orders.PATCH("/:id", r.orderHandler.UpdateOrder)
-			orders.POST("/:id/cancel", r.orderHandler.CancelOrder)
-			orders.GET("/:id/status", r.orderHandler.GetOrderStatus)
-			orders.GET("/:id/progress", r.orderHandler.GetOrderProgress)
-			orders.PATCH("/:id/priority", r.orderHandler.SetOrderPriority)
-		}
-	}
-}
-
-// healthCheck handles health check requests
-func (r *Router) healthCheck(c *gin.Context) {
-	// TODO: Check dependencies health
-	// TODO: Return health status
-}
-
-// Run starts the HTTP server
-func (r *Router) Run(addr string) error {
-	return r.engine.Run(addr)
-}
-
-// GetEngine returns the underlying Gin engine
-func (r *Router) GetEngine() *gin.Engine {
-	return r.engine
+	return mux
 }

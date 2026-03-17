@@ -8,7 +8,9 @@ import (
 	"go.temporal.io/sdk/client"
 
 	"github.com/yourorg/order-fulfillment-temporal-demo/internal/application/queries"
+	"github.com/yourorg/order-fulfillment-temporal-demo/internal/application/signals"
 	"github.com/yourorg/order-fulfillment-temporal-demo/internal/application/updates"
+	"github.com/yourorg/order-fulfillment-temporal-demo/internal/application/workflows"
 )
 
 // Task queue constants
@@ -51,6 +53,25 @@ func NewClient(config *Config) (*Client, error) {
 		client: c,
 		config: config,
 	}, nil
+}
+
+// StartOrderWorkflow starts a new OrderWorkflow execution.
+func (c *Client) StartOrderWorkflow(ctx context.Context, input workflows.OrderWorkflowInput) (client.WorkflowRun, error) {
+	options := client.StartWorkflowOptions{
+		ID:        "order-" + input.OrderID,
+		TaskQueue: OrderFulfillmentTaskQueue,
+	}
+	return c.client.ExecuteWorkflow(ctx, options, workflows.OrderWorkflow, input)
+}
+
+// CancelOrder sends a cancel_order signal to a running workflow.
+func (c *Client) CancelOrder(ctx context.Context, workflowID string, req signals.CancelOrderRequest) error {
+	return c.client.SignalWorkflow(ctx, workflowID, "", signals.CancelOrderSignal, req)
+}
+
+// ChangeShippingAddress sends an update-shipping-address signal to a running workflow.
+func (c *Client) ChangeShippingAddress(ctx context.Context, workflowID string, req signals.UpdateShippingAddressRequest) error {
+	return c.client.SignalWorkflow(ctx, workflowID, "", signals.UpdateShippingAddressSignal, req)
 }
 
 // ExecuteWorkflow starts a new workflow execution

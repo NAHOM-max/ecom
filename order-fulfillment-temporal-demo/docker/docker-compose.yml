@@ -1,19 +1,20 @@
 services:
   # Temporal server
   temporal:
-    image: temporalio/auto-setup:1.22.4
+    image: temporalio/auto-setup:1.25.0
     container_name: temporal
     ports:
       - "7233:7233"
       - "8233:8233"
     environment:
-      - DB=postgresql
+      - DB=postgres12
       - DB_PORT=5432
       - POSTGRES_USER=temporal
       - POSTGRES_PWD=temporal
       - POSTGRES_SEEDS=postgres
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
     networks:
       - temporal-network
 
@@ -44,6 +45,11 @@ services:
       - postgres-data:/var/lib/postgresql/data
     networks:
       - temporal-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U temporal"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   # Application database
   app-postgres:
@@ -57,6 +63,21 @@ services:
       - POSTGRES_DB=orders
     volumes:
       - app-postgres-data:/var/lib/postgresql/data
+    networks:
+      - temporal-network
+
+  # pgAdmin for managing databases
+  pgadmin:
+    image: dpage/pgadmin4
+    container_name: pgadmin
+    ports:
+      - "5051:80"
+    environment:
+      - PGADMIN_DEFAULT_EMAIL=admin@admin.com
+      - PGADMIN_DEFAULT_PASSWORD=admin
+    depends_on:
+      - postgres
+      - app-postgres
     networks:
       - temporal-network
 
