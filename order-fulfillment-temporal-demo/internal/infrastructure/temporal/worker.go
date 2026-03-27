@@ -4,6 +4,7 @@ import (
 	"log"
 
 	"go.temporal.io/sdk/client"
+	"go.temporal.io/sdk/interceptor"
 	"go.temporal.io/sdk/worker"
 )
 
@@ -17,6 +18,8 @@ type Worker struct {
 type WorkerConfig struct {
 	MaxConcurrentWorkflows  int
 	MaxConcurrentActivities int
+	// Interceptors are applied to every workflow and activity execution.
+	Interceptors []interceptor.WorkerInterceptor
 }
 
 // NewWorker creates a new Temporal worker
@@ -31,6 +34,7 @@ func NewWorker(c client.Client, config *WorkerConfig) *Worker {
 	w := worker.New(c, OrderFulfillmentTaskQueue, worker.Options{
 		MaxConcurrentWorkflowTaskExecutionSize: config.MaxConcurrentWorkflows,
 		MaxConcurrentActivityExecutionSize:     config.MaxConcurrentActivities,
+		Interceptors:                           config.Interceptors,
 	})
 
 	log.Printf("Worker created for task queue: %s", OrderFulfillmentTaskQueue)

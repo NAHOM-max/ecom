@@ -12,6 +12,7 @@ import (
 	"github.com/yourorg/order-fulfillment-temporal-demo/internal/application/queries"
 	"github.com/yourorg/order-fulfillment-temporal-demo/internal/application/signals"
 	"github.com/yourorg/order-fulfillment-temporal-demo/internal/application/updates"
+	"github.com/yourorg/order-fulfillment-temporal-demo/internal/infrastructure/messaging"
 )
 
 // OrderWorkflowInput contains the input parameters for order workflow
@@ -191,8 +192,105 @@ func OrderWorkflow(ctx workflow.Context, input OrderWorkflowInput) (*OrderWorkfl
 	state.LastUpdated = workflow.Now(ctx)
 	logger.Info("Inventory reserved successfully", "orderID", input.OrderID, "reservationID", reserveResult.ReservationID)
 
-	// Step 2: Charge Payment
-	logger.Info("Step 2: Charging payment", "orderID", input.OrderID)
+	// -------------------------------------------------------------------------
+	// VERSIONING: fraud-check-between-inventory-and-payment
+	//
+	// workflow.GetVersion records a version marker in the workflow history the
+	// first time it is called for a given changeID. On replay it reads the
+	// recorded value, so:
+	//
+	//   • Executions started BEFORE this code was deployed have no marker →
+	//     Temporal returns workflow.DefaultVersion (-1). They skip the fraud
+	//     check and continue with the original v1 flow.
+	//
+	//   • Executions started AFTER this code was deployed record version 1 →
+	//     They run the fraud check (v2 flow).
+	//
+	// minSupported = workflow.DefaultVersion allows the worker to replay old
+	// histories that pre-date this GetVersion call entirely.
+	// maxSupported = OrderWorkflowV2FraudCheck (1) is what new executions record.
+	// -------------------------------------------------------------------------
+	v := workflow.GetVersion(
+		ctx,
+		OrderWorkflowChangeIDFraudCheck,
+		workflow.DefaultVersion,        // min: still handle pre-versioning histories
+		OrderWorkflowV2FraudCheck,      // max: current latest version
+	)
+
+	if v >= OrderWorkflowV2FraudCheck {
+		// ---- V2 path: run fraud check before charging payment ----
+		logger.Info("Step 2 (v2): Running fraud check", "orderID", input.OrderID)
+		state.Status = "FRAUD_CHECK"
+		state.LastUpdated = workflow.Now(ctx)
+
+		if checkCancellation(ctx, cancelChannel, state, logger) {
+			logger.Warn("Order cancelled before fraud check, compensating inventory", "orderID", input.OrderID)
+			compensateInventory(ctx, logger, state.ReservationID)
+			return &OrderWorkflowResult{
+				OrderID: input.OrderID,
+				Status:  "CANCELLED",
+				Message: state.CancelReason,
+			}, nil
+		}
+
+		var fraudResult activities.FraudCheckResult
+		fraudErr := executeActivityWithSignals(ctx, cancelChannel, updateAddressChannel, state, logger, func() error {
+			return workflow.ExecuteActivity(ctx, "FraudCheck", activities.FraudCheckInput{
+				OrderID:    input.OrderID,
+				CustomerID: input.CustomerID,
+				Amount:     calculateTotal(input.Items),
+				Currency:   "USD",
+			}).Get(ctx, &fraudResult)
+		})
+
+		if fraudErr != nil {
+			logger.Error("Fraud check failed, compensating inventory", "orderID", input.OrderID, "error", fraudErr)
+			compensateInventory(ctx, logger, state.ReservationID)
+			state.Status = "FAILED"
+			return &OrderWorkflowResult{
+				OrderID: input.OrderID,
+				Status:  "FAILED",
+				Message: fmt.Sprintf("Fraud check error: %v", fraudErr),
+			}, fraudErr
+		}
+
+		if state.CancelRequested {
+			compensateInventory(ctx, logger, state.ReservationID)
+			return &OrderWorkflowResult{
+				OrderID: input.OrderID,
+				Status:  "CANCELLED",
+				Message: state.CancelReason,
+			}, nil
+		}
+
+		if !fraudResult.Approved {
+			logger.Warn("Order rejected by fraud check",
+				"orderID", input.OrderID,
+				"riskScore", fraudResult.RiskScore,
+				"reason", fraudResult.Reason,
+			)
+			compensateInventory(ctx, logger, state.ReservationID)
+			state.Status = "FAILED"
+			return &OrderWorkflowResult{
+				OrderID: input.OrderID,
+				Status:  "FAILED",
+				Message: fmt.Sprintf("Order rejected: %s", fraudResult.Reason),
+			}, nil
+		}
+
+		state.CompletedSteps = append(state.CompletedSteps, "fraud_check_passed")
+		state.LastUpdated = workflow.Now(ctx)
+		logger.Info("Fraud check passed",
+			"orderID", input.OrderID,
+			"riskScore", fraudResult.RiskScore,
+		)
+	} else {
+		// ---- V1 path: no fraud check (replaying old histories) ----
+		logger.Info("Step 2 (v1): Skipping fraud check (pre-v2 execution)", "orderID", input.OrderID)
+	}
+
+	// Step 2/3: Charge Payment (step number shifts in v2 but logic is identical)
+	logger.Info("Charging payment", "orderID", input.OrderID)
 	state.Status = "CHARGING_PAYMENT"
 	state.LastUpdated = workflow.Now(ctx)
 
@@ -539,6 +637,29 @@ func shipmentStatus(state *OrderWorkflowState) string {
 		return "pending"
 	default:
 		return "not_started"
+	}
+}
+
+// publishEvent fires a PublishEvent activity with best-effort retry.
+// Failures are logged but never block the workflow — event publishing
+// is a side-effect, not a saga step.
+func publishEvent(ctx workflow.Context, logger log.Logger, topic string, event messaging.Event) {
+	pubCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+		StartToCloseTimeout: time.Second * 30,
+		RetryPolicy: &temporal.RetryPolicy{
+			InitialInterval:    time.Second,
+			BackoffCoefficient: 2.0,
+			MaximumAttempts:    3,
+		},
+	})
+	if err := workflow.ExecuteActivity(pubCtx, "Publish",
+		activities.PublishEventInput{Topic: topic, Event: event},
+	).Get(pubCtx, nil); err != nil {
+		logger.Warn("Failed to publish event (non-fatal)",
+			"eventType", event.EventType,
+			"orderID", event.OrderID,
+			"error", err,
+		)
 	}
 }
 

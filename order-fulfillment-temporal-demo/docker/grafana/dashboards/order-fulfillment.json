@@ -1,0 +1,58 @@
+{
+  "title": "Order Fulfillment",
+  "uid": "order-fulfillment",
+  "schemaVersion": 36,
+  "version": 1,
+  "refresh": "10s",
+  "panels": [
+    {
+      "id": 1,
+      "title": "Workflows Started",
+      "type": "stat",
+      "gridPos": { "x": 0, "y": 0, "w": 6, "h": 4 },
+      "targets": [{ "expr": "sum(workflow_started_total)", "legendFormat": "started" }]
+    },
+    {
+      "id": 2,
+      "title": "Workflows Completed",
+      "type": "stat",
+      "gridPos": { "x": 6, "y": 0, "w": 6, "h": 4 },
+      "targets": [{ "expr": "sum(workflow_completed_total)", "legendFormat": "completed" }]
+    },
+    {
+      "id": 3,
+      "title": "Workflows Failed",
+      "type": "stat",
+      "gridPos": { "x": 12, "y": 0, "w": 6, "h": 4 },
+      "targets": [{ "expr": "sum(workflow_failed_total)", "legendFormat": "failed" }]
+    },
+    {
+      "id": 4,
+      "title": "Activity Executions / sec",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 4, "w": 12, "h": 8 },
+      "targets": [{ "expr": "rate(activity_execution_total[1m])", "legendFormat": "{{activity_type}}" }]
+    },
+    {
+      "id": 5,
+      "title": "Activity Retries / sec",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 4, "w": 12, "h": 8 },
+      "targets": [{ "expr": "rate(activity_retry_total[1m])", "legendFormat": "{{activity_type}}" }]
+    },
+    {
+      "id": 6,
+      "title": "Activity Duration p99 (seconds)",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 12, "w": 12, "h": 8 },
+      "targets": [{ "expr": "histogram_quantile(0.99, rate(activity_duration_seconds_bucket[5m]))", "legendFormat": "{{activity_type}}" }]
+    },
+    {
+      "id": 7,
+      "title": "HTTP Requests / sec",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 12, "w": 12, "h": 8 },
+      "targets": [{ "expr": "rate(http_requests_total[1m])", "legendFormat": "{{method}} {{path}} {{status}}" }]
+    }
+  ]
+}

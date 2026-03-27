@@ -1,19 +1,36 @@
 package main
 
 import (
+	"context"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.temporal.io/sdk/interceptor"
+
 	"github.com/yourorg/order-fulfillment-temporal-demo/internal/application/activities"
 	"github.com/yourorg/order-fulfillment-temporal-demo/internal/application/workflows"
 	"github.com/yourorg/order-fulfillment-temporal-demo/internal/infrastructure/messaging"
 	"github.com/yourorg/order-fulfillment-temporal-demo/internal/infrastructure/temporal"
+	"github.com/yourorg/order-fulfillment-temporal-demo/platform/observability"
 )
 
 func main() {
+	// --- Tracing ---
+	otlpEndpoint := getEnv("OTLP_ENDPOINT", "localhost:4318")
+	shutdownTracer, err := observability.InitTracer("order-fulfillment-worker", otlpEndpoint)
+	if err != nil {
+		log.Printf("Warning: tracing unavailable: %v", err)
+		shutdownTracer = func(context.Context) error { return nil }
+	}
+	defer func() {
+		_ = shutdownTracer(context.Background())
+	}()
+
 	// --- Temporal client ---
 	tc, err := temporal.NewClient(&temporal.Config{
 		HostPort:  getEnv("TEMPORAL_HOST_PORT", "localhost:7233"),
@@ -25,19 +42,35 @@ func main() {
 	defer tc.Close()
 
 	// --- Event producer ---
-	// Use a real Kafka producer when KAFKA_BROKERS is set; fall back to no-op.
 	producer := buildProducer()
 	defer producer.Close()
 
-	// --- Activities (producer injected) ---
+	// --- Activities ---
 	inventoryActivity := activities.NewInventoryActivity(0.30, producer)
 	paymentActivity := activities.NewPaymentActivity(0.30, producer)
 	shippingActivity := activities.NewShippingActivity(0.30, producer)
+	eventActivity := activities.NewPublishEventActivity(producer)
+	fraudActivity := activities.NewFraudCheckActivity(0.10)
 
-	// --- Worker ---
+	// --- Metrics server (worker exposes /metrics on a separate port) ---
+	metricsAddr := getEnv("WORKER_METRICS_ADDR", ":9090")
+	go func() {
+		mux := http.NewServeMux()
+		mux.Handle("/metrics", promhttp.Handler())
+		log.Printf("Worker metrics listening on %s/metrics", metricsAddr)
+		if err := http.ListenAndServe(metricsAddr, mux); err != nil {
+			log.Printf("Worker metrics server error: %v", err)
+		}
+	}()
+
+	// --- Worker (with metrics + tracing interceptors) ---
 	w := temporal.NewWorker(tc.GetClient(), &temporal.WorkerConfig{
 		MaxConcurrentWorkflows:  100,
 		MaxConcurrentActivities: 100,
+		Interceptors: []interceptor.WorkerInterceptor{
+			observability.NewMetricsInterceptor(),
+			observability.NewTracingInterceptor(),
+		},
 	})
 
 	w.RegisterWorkflow(workflows.OrderWorkflow)
@@ -56,7 +89,10 @@ func main() {
 	w.RegisterActivity(shippingActivity.CancelShipment)
 	w.RegisterActivity(shippingActivity.TrackShipment)
 
-	log.Println("Registered 9 activities")
+	w.RegisterActivity(eventActivity.Publish)
+	w.RegisterActivity(fraudActivity.FraudCheck)
+
+	log.Println("Registered 11 activities")
 
 	if err := w.Start(); err != nil {
 		log.Fatalf("Failed to start worker: %v", err)
@@ -71,15 +107,12 @@ func main() {
 	w.Stop()
 }
 
-// buildProducer returns a KafkaProducer when KAFKA_BROKERS is set,
-// otherwise a NoopProducer so the worker runs without Kafka.
 func buildProducer() messaging.EventProducer {
 	brokers := getEnv("KAFKA_BROKERS", "")
 	if brokers == "" {
 		log.Println("KAFKA_BROKERS not set — using no-op event producer")
 		return &messaging.NoopProducer{}
 	}
-
 	p, err := messaging.NewKafkaProducer(messaging.KafkaConfig{
 		Brokers: strings.Split(brokers, ","),
 	})
