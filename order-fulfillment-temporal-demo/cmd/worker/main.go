@@ -14,6 +14,7 @@ import (
 
 	"github.com/yourorg/order-fulfillment-temporal-demo/internal/application/activities"
 	"github.com/yourorg/order-fulfillment-temporal-demo/internal/application/workflows"
+	"github.com/yourorg/order-fulfillment-temporal-demo/internal/infrastructure/idempotency"
 	"github.com/yourorg/order-fulfillment-temporal-demo/internal/infrastructure/messaging"
 	"github.com/yourorg/order-fulfillment-temporal-demo/internal/infrastructure/temporal"
 	"github.com/yourorg/order-fulfillment-temporal-demo/platform/observability"
@@ -45,12 +46,15 @@ func main() {
 	producer := buildProducer()
 	defer producer.Close()
 
+	// --- Idempotency store (shared across all activities) ---
+	idemStore := idempotency.NewMemoryStore()
+
 	// --- Activities ---
-	inventoryActivity := activities.NewInventoryActivity(0.30, producer)
-	paymentActivity := activities.NewPaymentActivity(0.30, producer)
-	shippingActivity := activities.NewShippingActivity(0.30, producer)
+	inventoryActivity := activities.NewInventoryActivity(0.30, producer, idemStore)
+	paymentActivity := activities.NewPaymentActivity(0.30, producer, idemStore)
+	shippingActivity := activities.NewShippingActivity(0.30, producer, idemStore)
 	eventActivity := activities.NewPublishEventActivity(producer)
-	fraudActivity := activities.NewFraudCheckActivity(0.10)
+	fraudActivity := activities.NewFraudCheckActivity(0.10, idemStore)
 
 	// --- Metrics server (worker exposes /metrics on a separate port) ---
 	metricsAddr := getEnv("WORKER_METRICS_ADDR", ":9090")

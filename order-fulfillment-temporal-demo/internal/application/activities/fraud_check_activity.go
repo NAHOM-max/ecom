@@ -7,16 +7,17 @@ import (
 	"time"
 
 	"go.temporal.io/sdk/activity"
+
+	"github.com/yourorg/order-fulfillment-temporal-demo/internal/infrastructure/idempotency"
 )
 
-// FraudCheckActivity performs fraud screening before payment is charged.
-// Introduced in OrderWorkflow v2.
 type FraudCheckActivity struct {
 	failureRate float64
+	idempotency idempotency.Store
 }
 
-func NewFraudCheckActivity(failureRate float64) *FraudCheckActivity {
-	return &FraudCheckActivity{failureRate: failureRate}
+func NewFraudCheckActivity(failureRate float64, store idempotency.Store) *FraudCheckActivity {
+	return &FraudCheckActivity{failureRate: failureRate, idempotency: store}
 }
 
 type FraudCheckInput struct {
@@ -24,79 +25,70 @@ type FraudCheckInput struct {
 	CustomerID string
 	Amount     float64
 	Currency   string
-	// IPAddress and DeviceID would come from the real request context in production.
-	IPAddress string
-	DeviceID  string
+	IPAddress  string
+	DeviceID   string
 }
 
 type FraudCheckResult struct {
-	// Approved is true when the order passed all fraud checks.
-	Approved bool
-	// RiskScore is a 0–100 score; higher means riskier.
+	Approved  bool
 	RiskScore int
-	// Reason is populated when Approved is false.
-	Reason string
+	Reason    string
 }
 
-// FraudCheck screens an order for fraudulent signals.
-// Idempotent — the activity ID is used as the check reference.
 func (a *FraudCheckActivity) FraudCheck(ctx context.Context, input FraudCheckInput) (*FraudCheckResult, error) {
 	logger := activity.GetLogger(ctx)
 	info := activity.GetInfo(ctx)
+
+	// Key on order ID — a fraud decision for an order must be consistent
+	// across retries. We never want to approve on retry what was rejected first.
+	idemKey := "FraudCheck:" + input.OrderID
+
+	if exists, _ := a.idempotency.Exists(ctx, idemKey); exists {
+		var cached FraudCheckResult
+		if err := a.idempotency.Load(ctx, idemKey, &cached); err == nil {
+			logger.Info("FraudCheck: returning cached result (idempotent)",
+				"orderID", input.OrderID, "approved", cached.Approved)
+			return &cached, nil
+		}
+	}
 
 	logger.Info("FraudCheck started",
 		"orderID", input.OrderID,
 		"customerID", input.CustomerID,
 		"amount", input.Amount,
-		"attempt", info.Attempt,
-	)
+		"attempt", info.Attempt)
 
-	// Simulate network latency to external fraud service
 	time.Sleep(time.Duration(100+rand.Intn(300)) * time.Millisecond)
 
-	// Simulate transient service failure
 	if rand.Float64() < a.failureRate {
+		// Transient failure — do NOT cache, allow retry.
 		return nil, fmt.Errorf("fraud service unavailable: connection timeout")
 	}
 
-	// Simulate risk scoring
 	riskScore := rand.Intn(100)
-
-	logger.Info("FraudCheck risk score computed",
-		"orderID", input.OrderID,
-		"riskScore", riskScore,
-	)
-
-	// Simulate: high-value orders get extra scrutiny
 	if input.Amount > 500 {
 		riskScore = min(riskScore+15, 100)
-		logger.Info("FraudCheck: high-value order risk adjustment",
-			"orderID", input.OrderID,
-			"adjustedScore", riskScore,
-		)
 	}
 
-	// Score >= 80 → reject
+	var result *FraudCheckResult
 	if riskScore >= 80 {
-		logger.Warn("FraudCheck: order rejected",
-			"orderID", input.OrderID,
-			"riskScore", riskScore,
-		)
-		return &FraudCheckResult{
+		result = &FraudCheckResult{
 			Approved:  false,
 			RiskScore: riskScore,
 			Reason:    fmt.Sprintf("fraud risk score too high (%d/100)", riskScore),
-		}, nil
+		}
+	} else {
+		result = &FraudCheckResult{Approved: true, RiskScore: riskScore}
 	}
 
-	logger.Info("FraudCheck passed",
-		"orderID", input.OrderID,
-		"riskScore", riskScore,
-	)
-	return &FraudCheckResult{
-		Approved:  true,
-		RiskScore: riskScore,
-	}, nil
+	// Cache the decision — fraud verdicts must be deterministic across retries.
+	if err := a.idempotency.Save(ctx, idemKey, result); err != nil {
+		logger.Warn("FraudCheck: failed to save idempotency record", "error", err)
+	}
+
+	logger.Info("FraudCheck completed",
+		"orderID", input.OrderID, "approved", result.Approved, "riskScore", riskScore)
+	return result, nil
 }
 
 func min(a, b int) int {

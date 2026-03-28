@@ -8,21 +8,20 @@ import (
 
 	"go.temporal.io/sdk/activity"
 
+	"github.com/yourorg/order-fulfillment-temporal-demo/internal/infrastructure/idempotency"
 	"github.com/yourorg/order-fulfillment-temporal-demo/internal/infrastructure/messaging"
 )
 
-// InventoryActivity simulates inventory service operations
 type InventoryActivity struct {
 	failureRate float64
 	producer    messaging.EventProducer
+	idempotency idempotency.Store
 }
 
-// NewInventoryActivity creates a new inventory activity
-func NewInventoryActivity(failureRate float64, producer messaging.EventProducer) *InventoryActivity {
-	return &InventoryActivity{failureRate: failureRate, producer: producer}
+func NewInventoryActivity(failureRate float64, producer messaging.EventProducer, store idempotency.Store) *InventoryActivity {
+	return &InventoryActivity{failureRate: failureRate, producer: producer, idempotency: store}
 }
 
-// ReserveInventoryInput contains parameters for inventory reservation
 type ReserveInventoryInput struct {
 	OrderID string
 	Items   []InventoryItem
@@ -33,63 +32,68 @@ type InventoryItem struct {
 	Quantity  int
 }
 
-// ReserveInventoryResult contains the reservation result
 type ReserveInventoryResult struct {
 	ReservationID string
 	Success       bool
 	Message       string
 }
 
-// ReserveInventory reserves inventory for an order
-// Idempotent - uses activity ID as reservation ID
 func (a *InventoryActivity) ReserveInventory(ctx context.Context, input ReserveInventoryInput) (*ReserveInventoryResult, error) {
 	logger := activity.GetLogger(ctx)
-	activityInfo := activity.GetInfo(ctx)
+	info := activity.GetInfo(ctx)
 
-	// Generate idempotent reservation ID based on activity ID
-	reservationID := fmt.Sprintf("res-%s", activityInfo.ActivityID)
+	reservationID := fmt.Sprintf("res-%s", info.ActivityID)
+	// Idempotency key: activity name + stable reservation ID derived from activity ID.
+	// The activity ID is stable across retries for the same attempt within a workflow.
+	idemKey := "ReserveInventory:" + reservationID
+
+	// Check: was this reservation already completed on a previous attempt?
+	if exists, _ := a.idempotency.Exists(ctx, idemKey); exists {
+		var cached ReserveInventoryResult
+		if err := a.idempotency.Load(ctx, idemKey, &cached); err == nil {
+			logger.Info("ReserveInventory: returning cached result (idempotent)",
+				"orderID", input.OrderID, "reservationID", reservationID)
+			return &cached, nil
+		}
+	}
 
 	logger.Info("ReserveInventory started",
 		"orderID", input.OrderID,
 		"reservationID", reservationID,
 		"itemCount", len(input.Items),
-		"attempt", activityInfo.Attempt)
+		"attempt", info.Attempt)
 
-	// Simulate network delay
 	time.Sleep(time.Duration(100+rand.Intn(400)) * time.Millisecond)
 
-	// Simulate service instability
 	if rand.Float64() < a.failureRate {
 		logger.Warn("ReserveInventory failed - simulated service error",
-			"orderID", input.OrderID,
-			"reservationID", reservationID,
-			"attempt", activityInfo.Attempt)
+			"orderID", input.OrderID, "attempt", info.Attempt)
 		return nil, fmt.Errorf("inventory service unavailable: connection timeout")
 	}
 
-	// Simulate checking stock availability
 	for _, item := range input.Items {
-		logger.Info("Checking stock",
-			"productID", item.ProductID,
-			"quantity", item.Quantity)
-
-		// Simulate occasional out-of-stock (non-retryable)
-		if rand.Float64() < 0.05 { // 5% chance
-			logger.Error("Product out of stock",
-				"productID", item.ProductID,
-				"orderID", input.OrderID)
-			return &ReserveInventoryResult{
+		if rand.Float64() < 0.05 {
+			result := &ReserveInventoryResult{
 				ReservationID: "",
 				Success:       false,
 				Message:       fmt.Sprintf("Product %s is out of stock", item.ProductID),
-			}, nil // Return success with failure flag (business error, not retryable)
+			}
+			// Business failures are also cached — no point retrying an out-of-stock.
+			_ = a.idempotency.Save(ctx, idemKey, result)
+			return result, nil
 		}
 	}
 
-	logger.Info("ReserveInventory completed successfully",
-		"orderID", input.OrderID,
-		"reservationID", reservationID,
-		"itemCount", len(input.Items))
+	result := &ReserveInventoryResult{
+		ReservationID: reservationID,
+		Success:       true,
+		Message:       "Inventory reserved successfully",
+	}
+
+	// Persist before publishing — if publish fails the result is still safe.
+	if err := a.idempotency.Save(ctx, idemKey, result); err != nil {
+		logger.Warn("ReserveInventory: failed to save idempotency record", "error", err)
+	}
 
 	_ = a.producer.Publish(messaging.TopicInventory, messaging.Event{
 		EventID:   fmt.Sprintf("evt-%s", reservationID),
@@ -102,72 +106,48 @@ func (a *InventoryActivity) ReserveInventory(ctx context.Context, input ReserveI
 		},
 	})
 
-	return &ReserveInventoryResult{
-		ReservationID: reservationID,
-		Success:       true,
-		Message:       "Inventory reserved successfully",
-	}, nil
+	logger.Info("ReserveInventory completed",
+		"orderID", input.OrderID, "reservationID", reservationID)
+	return result, nil
 }
 
-// ReleaseInventory releases previously reserved inventory (compensation)
-// Idempotent - safe to call multiple times
 func (a *InventoryActivity) ReleaseInventory(ctx context.Context, reservationID string) error {
 	logger := activity.GetLogger(ctx)
-	activityInfo := activity.GetInfo(ctx)
+	info := activity.GetInfo(ctx)
 
-	logger.Info("ReleaseInventory started",
-		"reservationID", reservationID,
-		"attempt", activityInfo.Attempt)
+	idemKey := "ReleaseInventory:" + reservationID
 
-	// Simulate network delay
+	if exists, _ := a.idempotency.Exists(ctx, idemKey); exists {
+		logger.Info("ReleaseInventory: already released (idempotent)", "reservationID", reservationID)
+		return nil
+	}
+
+	logger.Info("ReleaseInventory started", "reservationID", reservationID, "attempt", info.Attempt)
 	time.Sleep(time.Duration(100+rand.Intn(300)) * time.Millisecond)
 
-	// Simulate service instability (lower failure rate for compensation)
-	if rand.Float64() < (a.failureRate * 0.5) { // Half the failure rate
-		logger.Warn("ReleaseInventory failed - simulated service error",
-			"reservationID", reservationID,
-			"attempt", activityInfo.Attempt)
+	if rand.Float64() < a.failureRate*0.5 {
 		return fmt.Errorf("inventory service unavailable: connection timeout")
 	}
 
-	// Idempotent: Check if already released (simulate)
-	logger.Info("Checking reservation status", "reservationID", reservationID)
+	if err := a.idempotency.Save(ctx, idemKey, map[string]string{"status": "released"}); err != nil {
+		logger.Warn("ReleaseInventory: failed to save idempotency record", "error", err)
+	}
 
-	// Simulate releasing inventory
-	logger.Info("Releasing inventory", "reservationID", reservationID)
-
-	logger.Info("ReleaseInventory completed successfully",
-		"reservationID", reservationID)
-
+	logger.Info("ReleaseInventory completed", "reservationID", reservationID)
 	return nil
 }
 
-// CheckAvailability checks if items are in stock
 func (a *InventoryActivity) CheckAvailability(ctx context.Context, items []InventoryItem) (bool, error) {
 	logger := activity.GetLogger(ctx)
-	activityInfo := activity.GetInfo(ctx)
+	info := activity.GetInfo(ctx)
 
-	logger.Info("CheckAvailability started",
-		"itemCount", len(items),
-		"attempt", activityInfo.Attempt)
-
-	// Simulate network delay
+	logger.Info("CheckAvailability started", "itemCount", len(items), "attempt", info.Attempt)
 	time.Sleep(time.Duration(50+rand.Intn(200)) * time.Millisecond)
 
-	// Simulate service instability
 	if rand.Float64() < a.failureRate {
-		logger.Warn("CheckAvailability failed - simulated service error",
-			"attempt", activityInfo.Attempt)
 		return false, fmt.Errorf("inventory service unavailable: connection timeout")
 	}
 
-	// Simulate checking each item
-	for _, item := range items {
-		logger.Info("Checking availability",
-			"productID", item.ProductID,
-			"quantity", item.Quantity)
-	}
-
-	logger.Info("CheckAvailability completed successfully", "available", true)
+	logger.Info("CheckAvailability completed", "available", true)
 	return true, nil
 }

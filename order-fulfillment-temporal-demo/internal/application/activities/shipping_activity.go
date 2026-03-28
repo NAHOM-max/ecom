@@ -8,21 +8,20 @@ import (
 
 	"go.temporal.io/sdk/activity"
 
+	"github.com/yourorg/order-fulfillment-temporal-demo/internal/infrastructure/idempotency"
 	"github.com/yourorg/order-fulfillment-temporal-demo/internal/infrastructure/messaging"
 )
 
-// ShippingActivity simulates shipping service operations
 type ShippingActivity struct {
 	failureRate float64
 	producer    messaging.EventProducer
+	idempotency idempotency.Store
 }
 
-// NewShippingActivity creates a new shipping activity
-func NewShippingActivity(failureRate float64, producer messaging.EventProducer) *ShippingActivity {
-	return &ShippingActivity{failureRate: failureRate, producer: producer}
+func NewShippingActivity(failureRate float64, producer messaging.EventProducer, store idempotency.Store) *ShippingActivity {
+	return &ShippingActivity{failureRate: failureRate, producer: producer, idempotency: store}
 }
 
-// CreateShipmentInput contains shipment creation parameters
 type CreateShipmentInput struct {
 	OrderID         string
 	CustomerAddress ShippingAddress
@@ -47,7 +46,6 @@ type ShippingItem struct {
 	Description string
 }
 
-// CreateShipmentResult contains shipment creation result
 type CreateShipmentResult struct {
 	ShipmentID     string
 	TrackingNumber string
@@ -57,93 +55,65 @@ type CreateShipmentResult struct {
 	Message        string
 }
 
-// CreateShipment creates a new shipment
-// Idempotent - uses activity ID as shipment ID
 func (a *ShippingActivity) CreateShipment(ctx context.Context, input CreateShipmentInput) (*CreateShipmentResult, error) {
 	logger := activity.GetLogger(ctx)
-	activityInfo := activity.GetInfo(ctx)
+	info := activity.GetInfo(ctx)
 
-	// Generate idempotent shipment ID based on activity ID
-	shipmentID := fmt.Sprintf("ship-%s", activityInfo.ActivityID)
-	activityIDStr := activityInfo.ActivityID
-	if len(activityIDStr) > 8 {
-		activityIDStr = activityIDStr[:8]
+	shipmentID := fmt.Sprintf("ship-%s", info.ActivityID)
+	idemKey := "CreateShipment:" + shipmentID
+
+	if exists, _ := a.idempotency.Exists(ctx, idemKey); exists {
+		var cached CreateShipmentResult
+		if err := a.idempotency.Load(ctx, idemKey, &cached); err == nil {
+			logger.Info("CreateShipment: returning cached result (idempotent)",
+				"orderID", input.OrderID, "shipmentID", shipmentID)
+			return &cached, nil
+		}
 	}
-	trackingNumber := fmt.Sprintf("TRK%d%s", time.Now().Unix(), activityIDStr)
+
+	actIDStr := info.ActivityID
+	if len(actIDStr) > 8 {
+		actIDStr = actIDStr[:8]
+	}
+	trackingNumber := fmt.Sprintf("TRK%d%s", time.Now().Unix(), actIDStr)
 
 	logger.Info("CreateShipment started",
 		"orderID", input.OrderID,
 		"shipmentID", shipmentID,
 		"shippingMethod", input.ShippingMethod,
-		"destination", fmt.Sprintf("%s, %s", input.CustomerAddress.City, input.CustomerAddress.State),
-		"itemCount", len(input.Items),
-		"attempt", activityInfo.Attempt)
+		"attempt", info.Attempt)
 
-	// Simulate network delay
 	time.Sleep(time.Duration(150+rand.Intn(500)) * time.Millisecond)
 
-	// Simulate service instability
 	if rand.Float64() < a.failureRate {
-		logger.Warn("CreateShipment failed - simulated service error",
-			"orderID", input.OrderID,
-			"shipmentID", shipmentID,
-			"attempt", activityInfo.Attempt)
 		return nil, fmt.Errorf("shipping service unavailable: API timeout")
 	}
 
-	// Simulate address validation
-	logger.Info("Validating shipping address",
-		"city", input.CustomerAddress.City,
-		"state", input.CustomerAddress.State,
-		"postalCode", input.CustomerAddress.PostalCode)
-
-	// Simulate occasional invalid address (non-retryable)
-	if rand.Float64() < 0.02 { // 2% chance
-		logger.Error("Invalid shipping address",
-			"orderID", input.OrderID,
-			"address", fmt.Sprintf("%s, %s", input.CustomerAddress.City, input.CustomerAddress.State))
-		return &CreateShipmentResult{
-			ShipmentID:     "",
-			TrackingNumber: "",
-			Carrier:        "",
-			EstimatedDate:  "",
-			Success:        false,
-			Message:        "Invalid shipping address: address not found",
-		}, nil // Return success with failure flag (business error)
+	// Invalid address — business error, cache it.
+	if rand.Float64() < 0.02 {
+		result := &CreateShipmentResult{Success: false, Message: "Invalid shipping address: address not found"}
+		_ = a.idempotency.Save(ctx, idemKey, result)
+		return result, nil
 	}
 
-	// Simulate carrier selection
 	carriers := []string{"FedEx", "UPS", "DHL", "USPS"}
 	carrier := carriers[rand.Intn(len(carriers))]
-	logger.Info("Carrier selected", "carrier", carrier)
+	estimatedDate := time.Now().AddDate(0, 0, 3+rand.Intn(5)).Format("2006-01-02")
 
-	// Simulate calculating weight
-	totalWeight := 0.0
-	for _, item := range input.Items {
-		totalWeight += item.Weight * float64(item.Quantity)
-		logger.Info("Processing item",
-			"productID", item.ProductID,
-			"quantity", item.Quantity,
-			"weight", item.Weight)
-	}
-	logger.Info("Total shipment weight calculated", "weight", totalWeight)
-
-	// Simulate generating shipping label
-	logger.Info("Generating shipping label",
-		"shipmentID", shipmentID,
-		"trackingNumber", trackingNumber)
 	time.Sleep(time.Duration(100+rand.Intn(200)) * time.Millisecond)
 
-	// Calculate estimated delivery date
-	daysToDeliver := 3 + rand.Intn(5) // 3-7 days
-	estimatedDate := time.Now().AddDate(0, 0, daysToDeliver).Format("2006-01-02")
+	result := &CreateShipmentResult{
+		ShipmentID:     shipmentID,
+		TrackingNumber: trackingNumber,
+		Carrier:        carrier,
+		EstimatedDate:  estimatedDate,
+		Success:        true,
+		Message:        "Shipment created successfully",
+	}
 
-	logger.Info("CreateShipment completed successfully",
-		"orderID", input.OrderID,
-		"shipmentID", shipmentID,
-		"trackingNumber", trackingNumber,
-		"carrier", carrier,
-		"estimatedDate", estimatedDate)
+	if err := a.idempotency.Save(ctx, idemKey, result); err != nil {
+		logger.Warn("CreateShipment: failed to save idempotency record", "error", err)
+	}
 
 	_ = a.producer.Publish(messaging.TopicShipments, messaging.Event{
 		EventID:   fmt.Sprintf("evt-%s", shipmentID),
@@ -158,75 +128,51 @@ func (a *ShippingActivity) CreateShipment(ctx context.Context, input CreateShipm
 		},
 	})
 
-	return &CreateShipmentResult{
-		ShipmentID:     shipmentID,
-		TrackingNumber: trackingNumber,
-		Carrier:        carrier,
-		EstimatedDate:  estimatedDate,
-		Success:        true,
-		Message:        "Shipment created successfully",
-	}, nil
+	logger.Info("CreateShipment completed",
+		"orderID", input.OrderID, "shipmentID", shipmentID, "carrier", carrier)
+	return result, nil
 }
 
-// CancelShipment cancels a shipment (compensation)
-// Idempotent - safe to call multiple times
 func (a *ShippingActivity) CancelShipment(ctx context.Context, shipmentID string) error {
 	logger := activity.GetLogger(ctx)
-	activityInfo := activity.GetInfo(ctx)
+	info := activity.GetInfo(ctx)
 
-	logger.Info("CancelShipment started",
-		"shipmentID", shipmentID,
-		"attempt", activityInfo.Attempt)
+	idemKey := "CancelShipment:" + shipmentID
 
-	// Simulate network delay
+	if exists, _ := a.idempotency.Exists(ctx, idemKey); exists {
+		logger.Info("CancelShipment: already cancelled (idempotent)", "shipmentID", shipmentID)
+		return nil
+	}
+
+	logger.Info("CancelShipment started", "shipmentID", shipmentID, "attempt", info.Attempt)
 	time.Sleep(time.Duration(100+rand.Intn(400)) * time.Millisecond)
 
-	// Simulate service instability (lower failure rate for cancellation)
-	if rand.Float64() < (a.failureRate * 0.5) { // Half the failure rate
-		logger.Warn("CancelShipment failed - simulated service error",
-			"shipmentID", shipmentID,
-			"attempt", activityInfo.Attempt)
+	if rand.Float64() < a.failureRate*0.5 {
 		return fmt.Errorf("shipping service unavailable: API timeout")
 	}
 
-	// Idempotent: Check if already cancelled (simulate)
-	logger.Info("Checking shipment status", "shipmentID", shipmentID)
+	if err := a.idempotency.Save(ctx, idemKey, map[string]string{"status": "cancelled"}); err != nil {
+		logger.Warn("CancelShipment: failed to save idempotency record", "error", err)
+	}
 
-	// Simulate cancelling with carrier
-	logger.Info("Cancelling shipment with carrier", "shipmentID", shipmentID)
-
-	logger.Info("CancelShipment completed successfully",
-		"shipmentID", shipmentID)
-
+	logger.Info("CancelShipment completed", "shipmentID", shipmentID)
 	return nil
 }
 
-// TrackShipment retrieves current shipment status
 func (a *ShippingActivity) TrackShipment(ctx context.Context, trackingNumber string) (string, error) {
 	logger := activity.GetLogger(ctx)
-	activityInfo := activity.GetInfo(ctx)
+	info := activity.GetInfo(ctx)
 
-	logger.Info("TrackShipment started",
-		"trackingNumber", trackingNumber,
-		"attempt", activityInfo.Attempt)
-
-	// Simulate network delay
+	logger.Info("TrackShipment started", "trackingNumber", trackingNumber, "attempt", info.Attempt)
 	time.Sleep(time.Duration(100+rand.Intn(300)) * time.Millisecond)
 
-	// Simulate service instability
 	if rand.Float64() < a.failureRate {
-		logger.Warn("TrackShipment failed - simulated service error",
-			"trackingNumber", trackingNumber,
-			"attempt", activityInfo.Attempt)
 		return "", fmt.Errorf("shipping service unavailable: connection timeout")
 	}
 
 	statuses := []string{"label_created", "picked_up", "in_transit", "out_for_delivery", "delivered"}
 	status := statuses[rand.Intn(len(statuses))]
 
-	logger.Info("TrackShipment completed successfully",
-		"trackingNumber", trackingNumber,
-		"status", status)
-
+	logger.Info("TrackShipment completed", "trackingNumber", trackingNumber, "status", status)
 	return status, nil
 }
