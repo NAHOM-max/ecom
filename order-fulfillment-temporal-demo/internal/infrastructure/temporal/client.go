@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 
+	"go.temporal.io/api/enums/v1"
 	"go.temporal.io/sdk/client"
 
 	"github.com/yourorg/order-fulfillment-temporal-demo/internal/application/queries"
@@ -58,8 +59,9 @@ func NewClient(config *Config) (*Client, error) {
 // StartOrderWorkflow starts a new OrderWorkflow execution.
 func (c *Client) StartOrderWorkflow(ctx context.Context, input workflows.OrderWorkflowInput) (client.WorkflowRun, error) {
 	options := client.StartWorkflowOptions{
-		ID:        "order-" + input.OrderID,
-		TaskQueue: OrderFulfillmentTaskQueue,
+		ID:                    "order-" + input.OrderID,
+		TaskQueue:             OrderFulfillmentTaskQueue,
+		WorkflowIDReusePolicy: enums.WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE,
 	}
 	return c.client.ExecuteWorkflow(ctx, options, workflows.OrderWorkflow, input)
 }
