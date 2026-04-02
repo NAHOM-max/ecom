@@ -37,9 +37,28 @@ type OrderWorkflowResult struct {
 	Message    string
 }
 
+// OrderStep is the typed enum for workflow step transitions.
+// It is the single source of truth for where the workflow currently is.
+// state.Status is always derived from this — never set independently.
+type OrderStep string
+
+const (
+	StepInit             OrderStep = "INIT"
+	StepReserveInventory OrderStep = "RESERVE_INVENTORY"
+	StepFraudCheck       OrderStep = "FRAUD_CHECK"
+	StepChargePayment    OrderStep = "CHARGE_PAYMENT"
+	StepCreateShipment   OrderStep = "CREATE_SHIPMENT"
+	StepCompleted        OrderStep = "COMPLETED"
+	StepFailed           OrderStep = "FAILED"
+	StepCancelled        OrderStep = "CANCELLED"
+)
+
 // OrderWorkflowState tracks the current state for persistence
 type OrderWorkflowState struct {
 	OrderID           string
+	// CurrentStep is the authoritative step position. Status is derived from it.
+	CurrentStep       OrderStep
+	// Status mirrors string(CurrentStep) for external query visibility.
 	Status            string
 	Priority          updates.OrderPriority
 	InventoryReserved bool
@@ -55,6 +74,32 @@ type OrderWorkflowState struct {
 	LastUpdated       time.Time
 }
 
+// IsTerminal returns true when the workflow has reached a final step.
+func (s *OrderWorkflowState) IsTerminal() bool {
+	return s.CurrentStep == StepCompleted ||
+		s.CurrentStep == StepFailed ||
+		s.CurrentStep == StepCancelled
+}
+
+// CanTransitionTo returns true when moving from the current step to next is
+// a valid forward transition. Not enforced yet — defined for future use.
+func (s *OrderWorkflowState) CanTransitionTo(next OrderStep) bool {
+	switch s.CurrentStep {
+	case StepInit:
+		return next == StepReserveInventory
+	case StepReserveInventory:
+		return next == StepFraudCheck || next == StepChargePayment
+	case StepFraudCheck:
+		return next == StepChargePayment
+	case StepChargePayment:
+		return next == StepCreateShipment
+	case StepCreateShipment:
+		return next == StepCompleted
+	default:
+		return false
+	}
+}
+
 // OrderWorkflow orchestrates the complete order fulfillment process with saga pattern
 func OrderWorkflow(ctx workflow.Context, input OrderWorkflowInput) (*OrderWorkflowResult, error) {
 	logger := workflow.GetLogger(ctx)
@@ -62,15 +107,12 @@ func OrderWorkflow(ctx workflow.Context, input OrderWorkflowInput) (*OrderWorkfl
 
 	// Initialize workflow state (persisted between steps)
 	state := &OrderWorkflowState{
-		OrderID:           input.OrderID,
-		Status:            "PROCESSING",
-		Priority:          updates.PriorityNormal,
-		InventoryReserved: false,
-		PaymentCharged:    false,
-		ShipmentCreated:   false,
-		CancelRequested:   false,
-		CompletedSteps:    []string{},
-		LastUpdated:       workflow.Now(ctx),
+		OrderID:        input.OrderID,
+		CurrentStep:    StepInit,
+		Status:         string(StepInit),
+		Priority:       updates.PriorityNormal,
+		CompletedSteps: []string{},
+		LastUpdated:    workflow.Now(ctx),
 	}
 
 	// Register order_status query handler
@@ -135,8 +177,7 @@ func OrderWorkflow(ctx workflow.Context, input OrderWorkflowInput) (*OrderWorkfl
 
 	// Step 1: Reserve Inventory
 	logger.Info("Step 1: Reserving inventory", "orderID", input.OrderID)
-	state.Status = "RESERVING_INVENTORY"
-	state.LastUpdated = workflow.Now(ctx)
+	setStep(state, StepReserveInventory, ctx)
 
 	var reserveResult activities.ReserveInventoryResult
 
@@ -161,7 +202,7 @@ func OrderWorkflow(ctx workflow.Context, input OrderWorkflowInput) (*OrderWorkfl
 
 	if err != nil {
 		logger.Error("Failed to reserve inventory", "orderID", input.OrderID, "error", err)
-		state.Status = "FAILED"
+		setStep(state, StepFailed, ctx)
 		return &OrderWorkflowResult{
 			OrderID: input.OrderID,
 			Status:  "FAILED",
@@ -182,7 +223,7 @@ func OrderWorkflow(ctx workflow.Context, input OrderWorkflowInput) (*OrderWorkfl
 	// Check if inventory reservation succeeded (business error)
 	if !reserveResult.Success {
 		logger.Error("Inventory reservation failed - business error", "orderID", input.OrderID, "message", reserveResult.Message)
-		state.Status = "FAILED"
+		setStep(state, StepFailed, ctx)
 		return &OrderWorkflowResult{
 			OrderID: input.OrderID,
 			Status:  "FAILED",
@@ -224,8 +265,7 @@ func OrderWorkflow(ctx workflow.Context, input OrderWorkflowInput) (*OrderWorkfl
 	if v >= OrderWorkflowV2FraudCheck {
 		// ---- V2 path: run fraud check before charging payment ----
 		logger.Info("Step 2 (v2): Running fraud check", "orderID", input.OrderID)
-		state.Status = "FRAUD_CHECK"
-		state.LastUpdated = workflow.Now(ctx)
+		setStep(state, StepFraudCheck, ctx)
 
 		var fraudResult activities.FraudCheckResult
 
@@ -253,7 +293,7 @@ func OrderWorkflow(ctx workflow.Context, input OrderWorkflowInput) (*OrderWorkfl
 		if fraudErr != nil {
 			logger.Error("Fraud check failed, compensating inventory", "orderID", input.OrderID, "error", fraudErr)
 			compensateInventory(ctx, logger, state.ReservationID)
-			state.Status = "FAILED"
+			setStep(state, StepFailed, ctx)
 			return &OrderWorkflowResult{
 				OrderID: input.OrderID,
 				Status:  "FAILED",
@@ -277,7 +317,7 @@ func OrderWorkflow(ctx workflow.Context, input OrderWorkflowInput) (*OrderWorkfl
 				"reason", fraudResult.Reason,
 			)
 			compensateInventory(ctx, logger, state.ReservationID)
-			state.Status = "FAILED"
+			setStep(state, StepFailed, ctx)
 			return &OrderWorkflowResult{
 				OrderID: input.OrderID,
 				Status:  "FAILED",
@@ -298,8 +338,7 @@ func OrderWorkflow(ctx workflow.Context, input OrderWorkflowInput) (*OrderWorkfl
 
 	// Step 2/3: Charge Payment (step number shifts in v2 but logic is identical)
 	logger.Info("Charging payment", "orderID", input.OrderID)
-	state.Status = "CHARGING_PAYMENT"
-	state.LastUpdated = workflow.Now(ctx)
+	setStep(state, StepChargePayment, ctx)
 
 	var paymentResult activities.ChargePaymentResult
 
@@ -328,7 +367,7 @@ func OrderWorkflow(ctx workflow.Context, input OrderWorkflowInput) (*OrderWorkfl
 		logger.Error("Payment failed, executing compensation", "orderID", input.OrderID, "error", err)
 		// Compensation: Release inventory
 		compensateInventory(ctx, logger, state.ReservationID)
-		state.Status = "FAILED"
+		setStep(state, StepFailed, ctx)
 		return &OrderWorkflowResult{
 			OrderID: input.OrderID,
 			Status:  "FAILED",
@@ -352,7 +391,7 @@ func OrderWorkflow(ctx workflow.Context, input OrderWorkflowInput) (*OrderWorkfl
 		logger.Error("Payment declined - business error", "orderID", input.OrderID, "status", paymentResult.Status, "message", paymentResult.Message)
 		// Compensation: Release inventory
 		compensateInventory(ctx, logger, state.ReservationID)
-		state.Status = "FAILED"
+		setStep(state, StepFailed, ctx)
 		return &OrderWorkflowResult{
 			OrderID: input.OrderID,
 			Status:  "FAILED",
@@ -368,8 +407,7 @@ func OrderWorkflow(ctx workflow.Context, input OrderWorkflowInput) (*OrderWorkfl
 
 	// Step 3: Create Shipment (Child Workflow) - Refactored with Selector
 	logger.Info("Step 3: Creating shipment", "orderID", input.OrderID)
-	state.Status = "CREATING_SHIPMENT"
-	state.LastUpdated = workflow.Now(ctx)
+	setStep(state, StepCreateShipment, ctx)
 
 	// Use updated shipping address if available
 	shippingAddress := ShippingAddress{
@@ -474,7 +512,7 @@ func OrderWorkflow(ctx workflow.Context, input OrderWorkflowInput) (*OrderWorkfl
 		logger.Warn("Order cancelled during shipment, compensating payment and inventory", "orderID", input.OrderID)
 		compensatePayment(ctx, logger, state.PaymentID)
 		compensateInventory(ctx, logger, state.ReservationID)
-		state.Status = "CANCELLED"
+		setStep(state, StepCancelled, ctx)
 		return &OrderWorkflowResult{
 			OrderID: input.OrderID,
 			Status:  "CANCELLED",
@@ -488,7 +526,7 @@ func OrderWorkflow(ctx workflow.Context, input OrderWorkflowInput) (*OrderWorkfl
 		// Compensation: Refund payment and release inventory
 		compensatePayment(ctx, logger, state.PaymentID)
 		compensateInventory(ctx, logger, state.ReservationID)
-		state.Status = "FAILED"
+		setStep(state, StepFailed, ctx)
 		return &OrderWorkflowResult{
 			OrderID: input.OrderID,
 			Status:  "FAILED",
@@ -502,7 +540,7 @@ func OrderWorkflow(ctx workflow.Context, input OrderWorkflowInput) (*OrderWorkfl
 		// Compensation: Refund payment and release inventory
 		compensatePayment(ctx, logger, state.PaymentID)
 		compensateInventory(ctx, logger, state.ReservationID)
-		state.Status = "FAILED"
+		setStep(state, StepFailed, ctx)
 		return &OrderWorkflowResult{
 			OrderID: input.OrderID,
 			Status:  "FAILED",
@@ -518,9 +556,8 @@ func OrderWorkflow(ctx workflow.Context, input OrderWorkflowInput) (*OrderWorkfl
 
 	// Step 4: Complete Order
 	logger.Info("Step 4: Completing order", "orderID", input.OrderID)
-	state.Status = "COMPLETED"
+	setStep(state, StepCompleted, ctx)
 	state.CompletedSteps = append(state.CompletedSteps, "order_completed")
-	state.LastUpdated = workflow.Now(ctx)
 
 	logger.Info("OrderWorkflow completed successfully",
 		"orderID", input.OrderID,
@@ -610,28 +647,39 @@ func calculateTotal(items []OrderItemInput) float64 {
 	return total
 }
 
-// paymentStatus derives a readable payment status from workflow state
+// setStep is the single place that advances workflow state.
+// It sets CurrentStep (the source of truth), derives Status from it,
+// and stamps LastUpdated — so no call site needs to do any of these manually.
+func setStep(state *OrderWorkflowState, step OrderStep, ctx workflow.Context) {
+	state.CurrentStep = step
+	state.Status = string(step)
+	state.LastUpdated = workflow.Now(ctx)
+}
+
+// paymentStatus derives a readable payment status from workflow state.
+// Uses CurrentStep instead of the raw Status string.
 func paymentStatus(state *OrderWorkflowState) string {
 	switch {
 	case state.CancelRequested && state.PaymentCharged:
 		return "refunded"
 	case state.PaymentCharged:
 		return "charged"
-	case state.Status == "CHARGING_PAYMENT":
+	case state.CurrentStep == StepChargePayment:
 		return "pending"
 	default:
 		return "not_started"
 	}
 }
 
-// shipmentStatus derives a readable shipment status from workflow state
+// shipmentStatus derives a readable shipment status from workflow state.
+// Uses CurrentStep instead of the raw Status string.
 func shipmentStatus(state *OrderWorkflowState) string {
 	switch {
 	case state.CancelRequested && state.ShipmentCreated:
 		return "cancelled"
 	case state.ShipmentCreated:
 		return "created"
-	case state.Status == "CREATING_SHIPMENT":
+	case state.CurrentStep == StepCreateShipment:
 		return "pending"
 	default:
 		return "not_started"
