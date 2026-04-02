@@ -140,7 +140,10 @@ func OrderWorkflow(ctx workflow.Context, input OrderWorkflowInput) (*OrderWorkfl
 
 	var reserveResult activities.ReserveInventoryResult
 
-	future := workflow.ExecuteActivity(ctx, "ReserveInventory", input)
+	future := workflow.ExecuteActivity(ctx, "ReserveInventory", activities.ReserveInventoryInput{
+		OrderID: input.OrderID,
+		Items:   convertToInventoryItems(input.Items),
+	})
 
 	err := executeActivityWithSelector(
 		ctx,
@@ -226,7 +229,12 @@ func OrderWorkflow(ctx workflow.Context, input OrderWorkflowInput) (*OrderWorkfl
 
 		var fraudResult activities.FraudCheckResult
 
-		future := workflow.ExecuteActivity(ctx, "FraudCheck", input)
+		future := workflow.ExecuteActivity(ctx, "FraudCheck", activities.FraudCheckInput{
+			OrderID:    input.OrderID,
+			CustomerID: input.CustomerID,
+			Amount:     calculateTotal(input.Items),
+			Currency:   "USD",
+		})
 
 		fraudErr := executeActivityWithSelector(
 			ctx,
@@ -295,7 +303,12 @@ func OrderWorkflow(ctx workflow.Context, input OrderWorkflowInput) (*OrderWorkfl
 
 	var paymentResult activities.ChargePaymentResult
 
-	future = workflow.ExecuteActivity(ctx, "ChargePayment", input)
+	future = workflow.ExecuteActivity(ctx, "ChargePayment", activities.ChargePaymentInput{
+		OrderID:    input.OrderID,
+		CustomerID: input.CustomerID,
+		Amount:     calculateTotal(input.Items),
+		Currency:   "USD",
+	})
 
 	err = executeActivityWithSelector(
 		ctx,
