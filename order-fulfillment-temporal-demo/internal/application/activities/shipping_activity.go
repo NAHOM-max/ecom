@@ -60,7 +60,8 @@ func (a *ShippingActivity) CreateShipment(ctx context.Context, input CreateShipm
 	info := activity.GetInfo(ctx)
 
 	shipmentID := fmt.Sprintf("ship-%s", info.ActivityID)
-	idemKey := "CreateShipment:" + shipmentID
+
+	idemKey := "CreateShipment:" + input.OrderID
 
 	if exists, _ := a.idempotency.Exists(ctx, idemKey); exists {
 		var cached CreateShipmentResult

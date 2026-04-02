@@ -45,7 +45,7 @@ func (a *InventoryActivity) ReserveInventory(ctx context.Context, input ReserveI
 	reservationID := fmt.Sprintf("res-%s", info.ActivityID)
 	// Idempotency key: activity name + stable reservation ID derived from activity ID.
 	// The activity ID is stable across retries for the same attempt within a workflow.
-	idemKey := "ReserveInventory:" + reservationID
+	idemKey := "ReserveInventory:" + input.OrderID
 
 	// Check: was this reservation already completed on a previous attempt?
 	if exists, _ := a.idempotency.Exists(ctx, idemKey); exists {

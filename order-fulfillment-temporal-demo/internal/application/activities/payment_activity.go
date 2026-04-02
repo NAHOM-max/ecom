@@ -42,7 +42,8 @@ func (a *PaymentActivity) ChargePayment(ctx context.Context, input ChargePayment
 	info := activity.GetInfo(ctx)
 
 	paymentID := fmt.Sprintf("pay-%s", info.ActivityID)
-	idemKey := "ChargePayment:" + paymentID
+
+	idemKey := "ChargePayment:" + input.OrderID
 
 	// If this payment was already charged on a previous attempt, return the
 	// cached result immediately — the customer must never be charged twice.
