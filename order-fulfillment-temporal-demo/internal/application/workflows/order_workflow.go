@@ -12,12 +12,7 @@ import (
 	"github.com/yourorg/order-fulfillment-temporal-demo/internal/application/queries"
 	"github.com/yourorg/order-fulfillment-temporal-demo/internal/application/signals"
 	"github.com/yourorg/order-fulfillment-temporal-demo/internal/application/updates"
-	"github.com/yourorg/order-fulfillment-temporal-demo/internal/infrastructure/messaging"
 )
-
-// ---------------------------------------------------------------------------
-// Input / Output types
-// ---------------------------------------------------------------------------
 
 type OrderWorkflowInput struct {
 	OrderID    string
@@ -39,12 +34,6 @@ type OrderWorkflowResult struct {
 	Message    string
 }
 
-// ---------------------------------------------------------------------------
-// Step enum
-// ---------------------------------------------------------------------------
-
-// OrderStep is the typed enum for workflow step transitions.
-// CurrentStep is the single source of truth — Status is always derived from it.
 type OrderStep string
 
 const (
@@ -58,9 +47,6 @@ const (
 	StepCancelled        OrderStep = "CANCELLED"
 )
 
-// stepOrder defines the forward progression index of each step.
-// Terminal steps (Failed, Cancelled) are intentionally absent — they are
-// not part of the forward chain and must never be used in HasCompleted.
 var stepOrder = map[OrderStep]int{
 	StepInit:             0,
 	StepReserveInventory: 1,
@@ -70,17 +56,10 @@ var stepOrder = map[OrderStep]int{
 	StepCompleted:        5,
 }
 
-// ---------------------------------------------------------------------------
-// State — cleaned, no redundant boolean flags
-// ---------------------------------------------------------------------------
-
-// OrderWorkflowState is the complete, serialisable workflow state.
-// Boolean flags (InventoryReserved, PaymentCharged, ShipmentCreated) have been
-// removed — step progression and IDs are the sole source of truth.
 type OrderWorkflowState struct {
 	OrderID         string
 	CurrentStep     OrderStep
-	Status          string // always string(CurrentStep)
+	Status          string
 	Priority        updates.OrderPriority
 	ReservationID   string
 	PaymentID       string
@@ -91,24 +70,18 @@ type OrderWorkflowState struct {
 	LastUpdated     time.Time
 }
 
-// IsTerminal returns true when the workflow has reached a final step.
 func (s *OrderWorkflowState) IsTerminal() bool {
 	return s.CurrentStep == StepCompleted ||
 		s.CurrentStep == StepFailed ||
 		s.CurrentStep == StepCancelled
 }
 
-// HasCompleted returns true when the workflow has reached or passed step in
-// the forward chain. Used to decide which compensations are needed.
-// Must not be called with terminal steps (StepFailed, StepCancelled).
 func (s *OrderWorkflowState) HasCompleted(step OrderStep) bool {
 	return stepOrder[s.CurrentStep] >= stepOrder[step]
 }
 
-// CanTransitionTo returns true when next is a valid forward or terminal
-// transition from the current step.
 func (s *OrderWorkflowState) CanTransitionTo(next OrderStep) bool {
-	// Any non-terminal step may transition to a terminal step.
+
 	if next == StepFailed || next == StepCancelled {
 		return !s.IsTerminal()
 	}
@@ -128,13 +101,6 @@ func (s *OrderWorkflowState) CanTransitionTo(next OrderStep) bool {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// setStep — enforced transitions
-// ---------------------------------------------------------------------------
-
-// setStep is the only place that mutates CurrentStep.
-// It panics on invalid transitions so bugs surface immediately during testing
-// rather than silently corrupting state in production.
 func setStep(state *OrderWorkflowState, next OrderStep, ctx workflow.Context) {
 	if !state.CanTransitionTo(next) {
 		panic(fmt.Sprintf(
@@ -147,23 +113,10 @@ func setStep(state *OrderWorkflowState, next OrderStep, ctx workflow.Context) {
 	state.LastUpdated = workflow.Now(ctx)
 }
 
-// ---------------------------------------------------------------------------
-// OrderWorkflow
-// ---------------------------------------------------------------------------
-
-// OrderWorkflow orchestrates the complete order fulfillment process.
-//
-// Architecture: single event-driven selector loop driven by OrderStep.
-//
-//	INIT → RESERVE_INVENTORY → [FRAUD_CHECK] → CHARGE_PAYMENT → CREATE_SHIPMENT → COMPLETED
-//	                                                          ↘ FAILED / CANCELLED (any step)
 func OrderWorkflow(ctx workflow.Context, input OrderWorkflowInput) (*OrderWorkflowResult, error) {
 	logger := workflow.GetLogger(ctx)
 	logger.Info("OrderWorkflow started", "orderID", input.OrderID, "customerID", input.CustomerID)
 
-	// -------------------------------------------------------------------------
-	// State initialisation
-	// -------------------------------------------------------------------------
 	state := &OrderWorkflowState{
 		OrderID:     input.OrderID,
 		CurrentStep: StepInit,
@@ -172,9 +125,6 @@ func OrderWorkflow(ctx workflow.Context, input OrderWorkflowInput) (*OrderWorkfl
 		LastUpdated: workflow.Now(ctx),
 	}
 
-	// -------------------------------------------------------------------------
-	// Query handler
-	// -------------------------------------------------------------------------
 	if err := workflow.SetQueryHandler(ctx, queries.OrderStatusQuery,
 		func() (queries.OrderStatusResult, error) {
 			return queries.OrderStatusResult{
@@ -189,9 +139,6 @@ func OrderWorkflow(ctx workflow.Context, input OrderWorkflowInput) (*OrderWorkfl
 		return nil, fmt.Errorf("failed to register order_status query handler: %w", err)
 	}
 
-	// -------------------------------------------------------------------------
-	// Update handler — set_priority
-	// -------------------------------------------------------------------------
 	if err := workflow.SetUpdateHandlerWithOptions(
 		ctx,
 		updates.SetPriorityUpdate,
@@ -220,15 +167,9 @@ func OrderWorkflow(ctx workflow.Context, input OrderWorkflowInput) (*OrderWorkfl
 		return nil, fmt.Errorf("failed to register set_priority update handler: %w", err)
 	}
 
-	// -------------------------------------------------------------------------
-	// Signal channels
-	// -------------------------------------------------------------------------
 	cancelChannel := workflow.GetSignalChannel(ctx, signals.CancelOrderSignal)
 	updateAddressChannel := workflow.GetSignalChannel(ctx, signals.UpdateShippingAddressSignal)
 
-	// -------------------------------------------------------------------------
-	// Activity options
-	// -------------------------------------------------------------------------
 	ctx = workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 		StartToCloseTimeout: time.Minute * 5,
 		RetryPolicy: &temporal.RetryPolicy{
@@ -239,10 +180,6 @@ func OrderWorkflow(ctx workflow.Context, input OrderWorkflowInput) (*OrderWorkfl
 		},
 	})
 
-	// -------------------------------------------------------------------------
-	// Versioning — called ONCE before the loop so the history marker is
-	// recorded at a fixed deterministic point.
-	// -------------------------------------------------------------------------
 	fraudCheckVersion := workflow.GetVersion(
 		ctx,
 		OrderWorkflowChangeIDFraudCheck,
@@ -250,9 +187,6 @@ func OrderWorkflow(ctx workflow.Context, input OrderWorkflowInput) (*OrderWorkfl
 		OrderWorkflowV2FraudCheck,
 	)
 
-	// -------------------------------------------------------------------------
-	// Loop control
-	// -------------------------------------------------------------------------
 	selector := workflow.NewSelector(ctx)
 
 	var (
@@ -262,13 +196,6 @@ func OrderWorkflow(ctx workflow.Context, input OrderWorkflowInput) (*OrderWorkfl
 		childCancel     workflow.CancelFunc
 	)
 
-	// -------------------------------------------------------------------------
-	// Global signal handlers — registered once, re-armed by Temporal on each
-	// new delivery.
-	// -------------------------------------------------------------------------
-
-	// Cancel signal: record intent and stop in-flight work.
-	// Compensation runs in the loop body — not here.
 	selector.AddReceive(cancelChannel, func(c workflow.ReceiveChannel, _ bool) {
 		var req signals.CancelOrderRequest
 		c.Receive(ctx, &req)
@@ -291,7 +218,6 @@ func OrderWorkflow(ctx workflow.Context, input OrderWorkflowInput) (*OrderWorkfl
 		}
 	})
 
-	// Address update signal: drain and apply; ignore after cancellation.
 	selector.AddReceive(updateAddressChannel, func(c workflow.ReceiveChannel, _ bool) {
 		var req signals.UpdateShippingAddressRequest
 		if state.CancelRequested {
@@ -318,21 +244,13 @@ func OrderWorkflow(ctx workflow.Context, input OrderWorkflowInput) (*OrderWorkfl
 		}
 	})
 
-	// -------------------------------------------------------------------------
-	// Advance past INIT before entering the loop
-	// -------------------------------------------------------------------------
 	setStep(state, StepReserveInventory, ctx)
 
-	// -------------------------------------------------------------------------
-	// Main event-driven loop
-	// -------------------------------------------------------------------------
 	for !state.IsTerminal() {
 
-		// -- Launch work for the current step (only when nothing is running) --
 		if !activityRunning && !childRunning {
 			switch state.CurrentStep {
 
-			// -----------------------------------------------------------------
 			case StepReserveInventory:
 				logger.Info("Starting ReserveInventory", "orderID", input.OrderID)
 				actCtx, cancel := workflow.WithCancel(ctx)
@@ -371,7 +289,6 @@ func OrderWorkflow(ctx workflow.Context, input OrderWorkflowInput) (*OrderWorkfl
 					}
 				})
 
-			// -----------------------------------------------------------------
 			case StepFraudCheck:
 				logger.Info("Starting FraudCheck", "orderID", input.OrderID)
 				actCtx, cancel := workflow.WithCancel(ctx)
@@ -407,7 +324,6 @@ func OrderWorkflow(ctx workflow.Context, input OrderWorkflowInput) (*OrderWorkfl
 					setStep(state, StepChargePayment, ctx)
 				})
 
-			// -----------------------------------------------------------------
 			case StepChargePayment:
 				logger.Info("Starting ChargePayment", "orderID", input.OrderID)
 				actCtx, cancel := workflow.WithCancel(ctx)
@@ -444,7 +360,6 @@ func OrderWorkflow(ctx workflow.Context, input OrderWorkflowInput) (*OrderWorkfl
 					setStep(state, StepCreateShipment, ctx)
 				})
 
-			// -----------------------------------------------------------------
 			case StepCreateShipment:
 				logger.Info("Starting ShipmentWorkflow", "orderID", input.OrderID)
 
@@ -502,37 +417,20 @@ func OrderWorkflow(ctx workflow.Context, input OrderWorkflowInput) (*OrderWorkfl
 			}
 		}
 
-		// -- Wait for the next event -------------------------------------------
 		selector.Select(ctx)
 
-		// -- Centralised cancellation: runs once nothing is in-flight ----------
 		if state.CancelRequested && !activityRunning && !childRunning && !state.IsTerminal() {
 			logger.Warn("Handling cancellation", "orderID", input.OrderID, "reason", state.CancelReason)
 			runCompensation(ctx, logger, state)
 			setStep(state, StepCancelled, ctx)
 			continue
 		}
-
-		// -- Centralised failure compensation ---------------------------------
-		// When a callback sets StepFailed, compensation runs here so the
-		// callback itself stays free of compensation logic.
-		if state.CurrentStep == StepFailed && !state.IsTerminal() {
-			// IsTerminal() is true for StepFailed, so this block is unreachable
-			// after the first iteration — kept as a safety net.
-		}
 	}
 
-	// -------------------------------------------------------------------------
-	// Post-loop: run compensation for failure path
-	// (callbacks set StepFailed; compensation runs here, not inside callbacks)
-	// -------------------------------------------------------------------------
 	if state.CurrentStep == StepFailed {
 		runCompensation(ctx, logger, state)
 	}
 
-	// -------------------------------------------------------------------------
-	// Build result from terminal state
-	// -------------------------------------------------------------------------
 	logger.Info("OrderWorkflow finished",
 		"orderID", input.OrderID,
 		"step", state.CurrentStep,
@@ -564,12 +462,6 @@ func OrderWorkflow(ctx workflow.Context, input OrderWorkflowInput) (*OrderWorkfl
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Compensation helpers
-// ---------------------------------------------------------------------------
-
-// compensateInventory releases reserved inventory using a disconnected context
-// so it runs even after workflow cancellation.
 func compensateInventory(ctx workflow.Context, logger log.Logger, reservationID string) {
 	logger.Warn("Compensating: Releasing inventory", "reservationID", reservationID)
 	compCtx, _ := workflow.NewDisconnectedContext(ctx)
@@ -588,7 +480,6 @@ func compensateInventory(ctx workflow.Context, logger log.Logger, reservationID 
 	}
 }
 
-// compensatePayment refunds the payment using a disconnected context.
 func compensatePayment(ctx workflow.Context, logger log.Logger, paymentID string) {
 	logger.Warn("Compensating: Refunding payment", "paymentID", paymentID)
 	compCtx, _ := workflow.NewDisconnectedContext(ctx)
@@ -607,12 +498,7 @@ func compensatePayment(ctx workflow.Context, logger log.Logger, paymentID string
 	}
 }
 
-// runCompensation undoes completed steps in reverse order (payment before inventory).
-// It uses the presence of IDs — not HasCompleted — as the source of truth,
-// because HasCompleted is unreliable when CurrentStep is a terminal value
-// (StepFailed / StepCancelled) which is absent from stepOrder.
 func runCompensation(ctx workflow.Context, logger log.Logger, state *OrderWorkflowState) {
-	// Reverse order: payment before inventory (last-in, first-out).
 	if state.PaymentID != "" {
 		compensatePayment(ctx, logger, state.PaymentID)
 	}
@@ -620,10 +506,6 @@ func runCompensation(ctx workflow.Context, logger log.Logger, state *OrderWorkfl
 		compensateInventory(ctx, logger, state.ReservationID)
 	}
 }
-
-// ---------------------------------------------------------------------------
-// Pure helpers
-// ---------------------------------------------------------------------------
 
 func convertToInventoryItems(items []OrderItemInput) []activities.InventoryItem {
 	result := make([]activities.InventoryItem, len(items))
@@ -641,9 +523,6 @@ func calculateTotal(items []OrderItemInput) float64 {
 	return total
 }
 
-// paymentStatus derives a readable payment status.
-// Uses PaymentID presence rather than HasCompleted so it is correct in
-// terminal states where stepOrder has no entry for StepFailed/StepCancelled.
 func paymentStatus(state *OrderWorkflowState) string {
 	switch {
 	case state.CancelRequested && state.PaymentID != "":
@@ -657,8 +536,6 @@ func paymentStatus(state *OrderWorkflowState) string {
 	}
 }
 
-// shipmentStatus derives a readable shipment status.
-// Uses ShipmentID presence rather than HasCompleted for the same reason.
 func shipmentStatus(state *OrderWorkflowState) string {
 	switch {
 	case state.CancelRequested && state.ShipmentID != "":
@@ -669,23 +546,5 @@ func shipmentStatus(state *OrderWorkflowState) string {
 		return "pending"
 	default:
 		return "not_started"
-	}
-}
-
-// publishEvent fires a PublishEvent activity with best-effort retry.
-func publishEvent(ctx workflow.Context, logger log.Logger, topic string, event messaging.Event) {
-	pubCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
-		StartToCloseTimeout: time.Second * 30,
-		RetryPolicy: &temporal.RetryPolicy{
-			InitialInterval:    time.Second,
-			BackoffCoefficient: 2.0,
-			MaximumAttempts:    3,
-		},
-	})
-	if err := workflow.ExecuteActivity(pubCtx, "Publish",
-		activities.PublishEventInput{Topic: topic, Event: event},
-	).Get(pubCtx, nil); err != nil {
-		logger.Warn("Failed to publish event (non-fatal)",
-			"eventType", event.EventType, "orderID", event.OrderID, "error", err)
 	}
 }
