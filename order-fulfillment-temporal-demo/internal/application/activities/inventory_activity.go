@@ -8,18 +8,20 @@ import (
 
 	"go.temporal.io/sdk/activity"
 
+	"github.com/yourorg/order-fulfillment-temporal-demo/internal/domain"
 	"github.com/yourorg/order-fulfillment-temporal-demo/internal/infrastructure/idempotency"
 	"github.com/yourorg/order-fulfillment-temporal-demo/internal/infrastructure/messaging"
 )
 
 type InventoryActivity struct {
-	failureRate float64
-	producer    messaging.EventProducer
-	idempotency idempotency.Store
+	failureRate      float64
+	inventoryService domain.InventoryService
+	producer         messaging.EventProducer
+	idempotency      idempotency.Store
 }
 
-func NewInventoryActivity(failureRate float64, producer messaging.EventProducer, store idempotency.Store) *InventoryActivity {
-	return &InventoryActivity{failureRate: failureRate, producer: producer, idempotency: store}
+func NewInventoryActivity(failureRate float64, inventoryService domain.InventoryService, producer messaging.EventProducer, store idempotency.Store) *InventoryActivity {
+	return &InventoryActivity{failureRate: failureRate, inventoryService: inventoryService, producer: producer, idempotency: store}
 }
 
 type ReserveInventoryInput struct {
@@ -42,7 +44,6 @@ func (a *InventoryActivity) ReserveInventory(ctx context.Context, input ReserveI
 	logger := activity.GetLogger(ctx)
 	info := activity.GetInfo(ctx)
 
-	reservationID := fmt.Sprintf("res-%s", info.ActivityID)
 	// Idempotency key: activity name + stable reservation ID derived from activity ID.
 	// The activity ID is stable across retries for the same attempt within a workflow.
 	idemKey := "ReserveInventory:" + input.OrderID
@@ -52,40 +53,46 @@ func (a *InventoryActivity) ReserveInventory(ctx context.Context, input ReserveI
 		var cached ReserveInventoryResult
 		if err := a.idempotency.Load(ctx, idemKey, &cached); err == nil {
 			logger.Info("ReserveInventory: returning cached result (idempotent)",
-				"orderID", input.OrderID, "reservationID", reservationID)
+				"orderID", input.OrderID)
 			return &cached, nil
 		}
 	}
 
 	logger.Info("ReserveInventory started",
 		"orderID", input.OrderID,
-		"reservationID", reservationID,
 		"itemCount", len(input.Items),
 		"attempt", info.Attempt)
 
-	time.Sleep(time.Duration(100+rand.Intn(400)) * time.Millisecond)
-
-	if rand.Float64() < a.failureRate {
-		logger.Warn("ReserveInventory failed - simulated service error",
-			"orderID", input.OrderID, "attempt", info.Attempt)
-		return nil, fmt.Errorf("inventory service unavailable: connection timeout")
+	totalAmount := 0
+	for _, item := range input.Items {
+		totalAmount += item.Quantity
 	}
 
-	for _, item := range input.Items {
-		if rand.Float64() < 0.05 {
+	domainItems := make([]domain.ReserveItem, len(input.Items))
+	for i, item := range input.Items {
+		domainItems[i] = domain.ReserveItem{ProductID: item.ProductID, Quantity: item.Quantity}
+	}
+
+	resp, err := a.inventoryService.Reserve(ctx, input.OrderID, domainItems)
+	if err != nil {
+		// Business failure (non-201 mapped as error) — cache and return without retrying
+		if isBusinessFailure(err) {
 			result := &ReserveInventoryResult{
 				ReservationID: "",
 				Success:       false,
-				Message:       fmt.Sprintf("Product %s is out of stock", item.ProductID),
+				Message:       err.Error(),
 			}
-			// Business failures are also cached — no point retrying an out-of-stock.
 			_ = a.idempotency.Save(ctx, idemKey, result)
 			return result, nil
 		}
+		// Network/system error — let Temporal retry
+		logger.Error("ReserveInventory failed - service error",
+			"orderID", input.OrderID, "attempt", info.Attempt, "error", err)
+		return nil, err
 	}
 
 	result := &ReserveInventoryResult{
-		ReservationID: reservationID,
+		ReservationID: resp.ReservationID,
 		Success:       true,
 		Message:       "Inventory reserved successfully",
 	}
@@ -96,19 +103,33 @@ func (a *InventoryActivity) ReserveInventory(ctx context.Context, input ReserveI
 	}
 
 	_ = a.producer.Publish(messaging.TopicInventory, messaging.Event{
-		EventID:   fmt.Sprintf("evt-%s", reservationID),
+		EventID:   fmt.Sprintf("evt-%s", result.ReservationID),
 		EventType: messaging.EventInventoryReserved,
 		Timestamp: time.Now(),
 		OrderID:   input.OrderID,
 		Payload: messaging.InventoryReservedPayload{
-			ReservationID: reservationID,
+			ReservationID: result.ReservationID,
 			ItemCount:     len(input.Items),
 		},
 	})
 
 	logger.Info("ReserveInventory completed",
-		"orderID", input.OrderID, "reservationID", reservationID)
+		"orderID", input.OrderID, "reservationID", result.ReservationID)
 	return result, nil
+}
+
+// isBusinessFailure returns true for errors originating from a non-201 HTTP response.
+// These carry the prefix set by InventoryClient and must not be retried.
+func isBusinessFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return len(msg) > 0 && (startsWith(msg, "inventory service error:") || startsWith(msg, "inventory client: missing"))
+}
+
+func startsWith(s, prefix string) bool {
+	return len(s) >= len(prefix) && s[:len(prefix)] == prefix
 }
 
 func (a *InventoryActivity) ReleaseInventory(ctx context.Context, reservationID string) error {
