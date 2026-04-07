@@ -503,7 +503,7 @@ func runCompensation(ctx workflow.Context, logger log.Logger, state *OrderWorkfl
 		compensatePayment(ctx, logger, state.PaymentID)
 	}
 	if state.ReservationID != "" {
-		compensateInventory(ctx, logger, state.ReservationID)
+		compensateInventory(ctx, logger, state.OrderID)
 	}
 }
 

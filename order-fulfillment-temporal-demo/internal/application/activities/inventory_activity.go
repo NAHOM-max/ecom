@@ -144,10 +144,11 @@ func (a *InventoryActivity) ReleaseInventory(ctx context.Context, reservationID 
 	}
 
 	logger.Info("ReleaseInventory started", "reservationID", reservationID, "attempt", info.Attempt)
-	time.Sleep(time.Duration(100+rand.Intn(300)) * time.Millisecond)
 
-	if rand.Float64() < a.failureRate*0.5 {
-		return fmt.Errorf("inventory service unavailable: connection timeout")
+	if err := a.inventoryService.Release(ctx, reservationID); err != nil {
+		logger.Error("ReleaseInventory failed - service error",
+			"reservationID", reservationID, "attempt", info.Attempt, "error", err)
+		return err
 	}
 
 	if err := a.idempotency.Save(ctx, idemKey, map[string]string{"status": "released"}); err != nil {

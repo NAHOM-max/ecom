@@ -5,6 +5,7 @@ import "context"
 // InventoryService defines the contract for inventory reservation operations.
 type InventoryService interface {
 	Reserve(ctx context.Context, orderID string, items []ReserveItem) (*ReserveResponse, error)
+	Release(ctx context.Context, reservationID string) error
 }
 
 // ReserveItem is a single product line in a reservation request.

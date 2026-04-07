@@ -12,6 +12,7 @@ import (
 )
 
 const inventoryServiceURL = "http://localhost:5000/reserve"
+const inventoryReleaseURL = "http://localhost:5000/return"
 
 type InventoryClient struct {
 	client *http.Client
@@ -39,6 +40,41 @@ type reserveSuccessResponse struct {
 
 type reserveErrorResponse struct {
 	Error string `json:"error"`
+}
+
+type releaseRequest struct {
+	ReservationID string `json:"order_id"`
+}
+
+func (c *InventoryClient) Release(ctx context.Context, reservationID string) error {
+	body, err := json.Marshal(releaseRequest{ReservationID: reservationID})
+	if err != nil {
+		return fmt.Errorf("inventory client: marshal release request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, inventoryReleaseURL, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("inventory client: build release request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		// Network / timeout — retryable
+		return fmt.Errorf("inventory client: release request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		var errResp reserveErrorResponse
+		if jsonErr := json.NewDecoder(resp.Body).Decode(&errResp); jsonErr != nil || errResp.Error == "" {
+			return fmt.Errorf("inventory client: release failed: status %d", resp.StatusCode)
+		}
+		// Non-200 — retryable (compensation must succeed)
+		return fmt.Errorf("inventory client: release failed: %s", errResp.Error)
+	}
+
+	return nil
 }
 
 func (c *InventoryClient) Reserve(ctx context.Context, orderID string, items []domain.ReserveItem) (*domain.ReserveResponse, error) {
