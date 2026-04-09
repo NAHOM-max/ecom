@@ -196,6 +196,14 @@ func OrderWorkflow(ctx workflow.Context, input OrderWorkflowInput) (*OrderWorkfl
 		childCancel     workflow.CancelFunc
 	)
 
+	// paymentUpdateChan is registered once ChargePayment initiates.
+	// It is nil until then so the selector ignores it.
+	paymentUpdateChan := workflow.GetSignalChannel(ctx, signals.PaymentUpdateSignal)
+	var (
+		awaitingPaymentConfirm bool   // true while waiting for payment_update signal
+		initiatedPaymentID     string // PaymentID returned by ChargePayment activity
+	)
+
 	selector.AddReceive(cancelChannel, func(c workflow.ReceiveChannel, _ bool) {
 		var req signals.CancelOrderRequest
 		c.Receive(ctx, &req)
@@ -244,11 +252,55 @@ func OrderWorkflow(ctx workflow.Context, input OrderWorkflowInput) (*OrderWorkfl
 		}
 	})
 
+	// payment_update signal — only acted on while awaitingPaymentConfirm is true.
+	// Signals arriving at other times are drained and discarded.
+	selector.AddReceive(paymentUpdateChan, func(c workflow.ReceiveChannel, _ bool) {
+		var sig signals.PaymentUpdatePayload
+		c.Receive(ctx, &sig)
+
+		if !awaitingPaymentConfirm {
+			// Signal arrived outside the payment-wait window — discard.
+			logger.Warn("payment_update signal received outside payment-wait window, discarding",
+				"paymentID", sig.PaymentID, "status", sig.Status)
+			return
+		}
+
+		if sig.PaymentID != initiatedPaymentID {
+			// Belongs to a different payment — ignore.
+			logger.Warn("payment_update signal for unknown paymentID, ignoring",
+				"expected", initiatedPaymentID, "got", sig.PaymentID)
+			return
+		}
+
+		logger.Info("payment_update signal received",
+			"orderID", input.OrderID, "paymentID", sig.PaymentID, "status", sig.Status)
+
+		switch sig.Status {
+		case "SUCCESSFUL":
+			awaitingPaymentConfirm = false
+			state.PaymentID = sig.PaymentID
+			logger.Info("Payment confirmed", "orderID", input.OrderID, "paymentID", sig.PaymentID)
+			setStep(state, StepCreateShipment, ctx)
+
+		case "FAILED", "CANCELED":
+			awaitingPaymentConfirm = false
+			logger.Warn("Payment failed/canceled",
+				"orderID", input.OrderID, "paymentID", sig.PaymentID, "status", sig.Status)
+			setStep(state, StepFailed, ctx)
+
+		default:
+			logger.Warn("payment_update: unknown status, ignoring",
+				"status", sig.Status, "paymentID", sig.PaymentID)
+		}
+	})
+
 	setStep(state, StepReserveInventory, ctx)
 
 	for !state.IsTerminal() {
 
-		if !activityRunning && !childRunning {
+		// -- Launch work for the current step (only when nothing is running
+		//    and we are not waiting for a payment confirmation signal) --------
+		if !activityRunning && !childRunning && !awaitingPaymentConfirm {
 			switch state.CurrentStep {
 
 			case StepReserveInventory:
@@ -348,16 +400,14 @@ func OrderWorkflow(ctx workflow.Context, input OrderWorkflowInput) (*OrderWorkfl
 						setStep(state, StepFailed, ctx)
 						return
 					}
-					if result.Status != "charged" {
-						logger.Error("ChargePayment declined",
-							"status", result.Status, "message", result.Message)
-						setStep(state, StepFailed, ctx)
-						return
-					}
 
-					state.PaymentID = result.PaymentID
-					logger.Info("ChargePayment succeeded", "paymentID", result.PaymentID)
-					setStep(state, StepCreateShipment, ctx)
+					// Activity succeeded — payment is "initiated".
+					// DO NOT advance step yet. Wait for payment_update signal
+					// from the payment microservice before proceeding.
+					initiatedPaymentID = result.PaymentID
+					awaitingPaymentConfirm = true
+					logger.Info("ChargePayment initiated, waiting for payment_update signal",
+						"orderID", input.OrderID, "paymentID", result.PaymentID)
 				})
 
 			case StepCreateShipment:

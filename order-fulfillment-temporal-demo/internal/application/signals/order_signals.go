@@ -1,40 +1,41 @@
 package signals
 
-// Signals allow external systems to send messages to running workflows
-// Used for:
-// - Order cancellation requests
-// - Order updates from external events
-// - Customer-initiated changes
-// - Admin interventions
-//
-// Signals are asynchronous and durable - they're queued if workflow is busy
-
-// Signal names as constants for type safety
+// Signal names as constants for type safety.
 const (
-	// CancelOrderSignal requests order cancellation
+	// CancelOrderSignal requests order cancellation.
 	CancelOrderSignal = "cancel-order"
 
-	// UpdateOrderSignal sends order updates
+	// UpdateOrderSignal sends order updates.
 	UpdateOrderSignal = "update-order"
 
-	// UpdateShippingAddressSignal updates shipping address
+	// UpdateShippingAddressSignal updates shipping address.
 	UpdateShippingAddressSignal = "update-shipping-address"
 
-	// PaymentConfirmedSignal notifies payment confirmation from webhook
+	// PaymentUpdateSignal delivers payment confirmation or failure from the payment MS.
+	PaymentUpdateSignal = "payment_update"
+
+	// PaymentConfirmedSignal notifies payment confirmation from webhook.
 	PaymentConfirmedSignal = "payment-confirmed"
 
-	// ShipmentStatusSignal updates shipment status from carrier
+	// ShipmentStatusSignal updates shipment status from carrier.
 	ShipmentStatusSignal = "shipment-status"
 )
 
-// CancelOrderRequest contains cancellation request data
+// PaymentUpdatePayload is the payload of the payment_update signal,
+// sent by the payment microservice via webhook.
+type PaymentUpdatePayload struct {
+	PaymentID string `json:"payment_id"`
+	Status    string `json:"status"` // SUCCESSFUL, FAILED, CANCELED
+}
+
+// CancelOrderRequest contains cancellation request data.
 type CancelOrderRequest struct {
 	Reason    string
 	RequestBy string
 	Timestamp int64
 }
 
-// UpdateShippingAddressRequest contains shipping address update data
+// UpdateShippingAddressRequest contains shipping address update data.
 type UpdateShippingAddressRequest struct {
 	Name       string
 	Street     string
@@ -47,7 +48,7 @@ type UpdateShippingAddressRequest struct {
 	Timestamp  int64
 }
 
-// UpdateOrderRequest contains order update data
+// UpdateOrderRequest contains order update data.
 type UpdateOrderRequest struct {
 	Field     string
 	Value     interface{}
@@ -55,7 +56,7 @@ type UpdateOrderRequest struct {
 	Timestamp int64
 }
 
-// PaymentConfirmation contains payment webhook data
+// PaymentConfirmation contains payment webhook data.
 type PaymentConfirmation struct {
 	PaymentID     string
 	Status        string
@@ -63,7 +64,7 @@ type PaymentConfirmation struct {
 	Timestamp     int64
 }
 
-// ShipmentStatusUpdate contains carrier status update
+// ShipmentStatusUpdate contains carrier status update.
 type ShipmentStatusUpdate struct {
 	ShipmentID     string
 	Status         string

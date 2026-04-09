@@ -3,23 +3,23 @@ package activities
 import (
 	"context"
 	"fmt"
-	"math/rand"
 	"time"
 
 	"go.temporal.io/sdk/activity"
 
 	"github.com/yourorg/order-fulfillment-temporal-demo/internal/infrastructure/idempotency"
 	"github.com/yourorg/order-fulfillment-temporal-demo/internal/infrastructure/messaging"
+	"github.com/yourorg/order-fulfillment-temporal-demo/internal/infrastructure/payment"
 )
 
 type PaymentActivity struct {
-	failureRate float64
-	producer    messaging.EventProducer
-	idempotency idempotency.Store
+	paymentClient payment.PaymentClient
+	producer      messaging.EventProducer
+	idempotency   idempotency.Store
 }
 
-func NewPaymentActivity(failureRate float64, producer messaging.EventProducer, store idempotency.Store) *PaymentActivity {
-	return &PaymentActivity{failureRate: failureRate, producer: producer, idempotency: store}
+func NewPaymentActivity(client payment.PaymentClient, producer messaging.EventProducer, store idempotency.Store) *PaymentActivity {
+	return &PaymentActivity{paymentClient: client, producer: producer, idempotency: store}
 }
 
 type ChargePaymentInput struct {
@@ -41,89 +41,53 @@ func (a *PaymentActivity) ChargePayment(ctx context.Context, input ChargePayment
 	logger := activity.GetLogger(ctx)
 	info := activity.GetInfo(ctx)
 
-	paymentID := fmt.Sprintf("pay-%s", info.ActivityID)
-
 	idemKey := "ChargePayment:" + input.OrderID
 
-	// If this payment was already charged on a previous attempt, return the
+	// If this payment was already initiated on a previous attempt, return the
 	// cached result immediately — the customer must never be charged twice.
 	if exists, _ := a.idempotency.Exists(ctx, idemKey); exists {
 		var cached ChargePaymentResult
 		if err := a.idempotency.Load(ctx, idemKey, &cached); err == nil {
 			logger.Info("ChargePayment: returning cached result (idempotent)",
-				"orderID", input.OrderID, "paymentID", paymentID)
+				"orderID", input.OrderID, "paymentID", cached.PaymentID)
 			return &cached, nil
 		}
 	}
-
-	transactionID := fmt.Sprintf("txn-%s-%d", info.ActivityID, time.Now().Unix())
 
 	logger.Info("ChargePayment started",
 		"orderID", input.OrderID,
 		"customerID", input.CustomerID,
 		"amount", input.Amount,
-		"paymentID", paymentID,
 		"attempt", info.Attempt)
 
-	time.Sleep(time.Duration(200+rand.Intn(800)) * time.Millisecond)
-
-	if rand.Float64() < a.failureRate {
-		// Transient failure — do NOT cache, allow retry.
-		return nil, fmt.Errorf("payment gateway unavailable: network timeout")
-	}
-
-	// Business decline — cache so retries return the same decline.
-	if rand.Float64() < 0.03 {
-		result := &ChargePaymentResult{
-			PaymentID:     paymentID,
-			Status:        "declined",
-			TransactionID: transactionID,
-			Message:       "Payment declined: insufficient funds",
-		}
-		_ = a.idempotency.Save(ctx, idemKey, result)
-		return result, nil
-	}
-
-	// Fraud detection — cache so retries return the same rejection.
-	if rand.Float64() < 0.01 {
-		result := &ChargePaymentResult{
-			PaymentID:     paymentID,
-			Status:        "fraud_detected",
-			TransactionID: transactionID,
-			Message:       "Payment flagged for potential fraud",
-		}
-		_ = a.idempotency.Save(ctx, idemKey, result)
-		return result, nil
+	resp, err := a.paymentClient.InitiatePayment(ctx, payment.InitiatePaymentRequest{
+		CustomerID: input.CustomerID,
+		OrderID:    input.OrderID,
+		WorkflowID: info.WorkflowExecution.ID,
+		Amount:     input.Amount,
+	})
+	if err != nil {
+		// Network / service error — do NOT cache, let Temporal retry.
+		logger.Error("ChargePayment: payment service error",
+			"orderID", input.OrderID, "attempt", info.Attempt, "error", err)
+		return nil, err
 	}
 
 	result := &ChargePaymentResult{
-		PaymentID:     paymentID,
-		Status:        "charged",
-		TransactionID: transactionID,
-		Message:       "Payment processed successfully",
+		PaymentID:     resp.PaymentID,
+		Status:        "initiated",
+		TransactionID: "",
+		Message:       "Payment initiated successfully",
 	}
 
-	// Save before publishing — guarantees the charge is recorded even if
-	// the process crashes between Save and Publish.
+	// Save before returning — guarantees idempotency even if the worker crashes
+	// between this point and the workflow receiving the result.
 	if err := a.idempotency.Save(ctx, idemKey, result); err != nil {
 		logger.Warn("ChargePayment: failed to save idempotency record", "error", err)
 	}
 
-	_ = a.producer.Publish(messaging.TopicPayments, messaging.Event{
-		EventID:   fmt.Sprintf("evt-%s", paymentID),
-		EventType: messaging.EventPaymentCharged,
-		Timestamp: time.Now(),
-		OrderID:   input.OrderID,
-		Payload: messaging.PaymentChargedPayload{
-			PaymentID:     paymentID,
-			TransactionID: transactionID,
-			Amount:        input.Amount,
-			Currency:      input.Currency,
-		},
-	})
-
 	logger.Info("ChargePayment completed",
-		"orderID", input.OrderID, "paymentID", paymentID, "amount", input.Amount)
+		"orderID", input.OrderID, "paymentID", resp.PaymentID)
 	return result, nil
 }
 
@@ -141,12 +105,6 @@ func (a *PaymentActivity) RefundPayment(ctx context.Context, paymentID string) e
 	refundID := fmt.Sprintf("ref-%s-%d", paymentID, time.Now().Unix())
 	logger.Info("RefundPayment started", "paymentID", paymentID, "refundID", refundID, "attempt", info.Attempt)
 
-	time.Sleep(time.Duration(200+rand.Intn(600)) * time.Millisecond)
-
-	if rand.Float64() < a.failureRate*0.5 {
-		return fmt.Errorf("payment gateway unavailable: network timeout")
-	}
-
 	if err := a.idempotency.Save(ctx, idemKey, map[string]string{"refund_id": refundID, "status": "refunded"}); err != nil {
 		logger.Warn("RefundPayment: failed to save idempotency record", "error", err)
 	}
@@ -160,12 +118,6 @@ func (a *PaymentActivity) VerifyPayment(ctx context.Context, paymentID string) (
 	info := activity.GetInfo(ctx)
 
 	logger.Info("VerifyPayment started", "paymentID", paymentID, "attempt", info.Attempt)
-	time.Sleep(time.Duration(100+rand.Intn(300)) * time.Millisecond)
-
-	if rand.Float64() < a.failureRate {
-		return "", fmt.Errorf("payment gateway unavailable: connection timeout")
-	}
-
 	logger.Info("VerifyPayment completed", "paymentID", paymentID, "status", "charged")
 	return "charged", nil
 }
