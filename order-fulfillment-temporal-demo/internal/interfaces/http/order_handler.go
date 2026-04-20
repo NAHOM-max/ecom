@@ -30,6 +30,10 @@ func (h *OrderHandler) CreateOrder(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "order_id and customer_id are required")
 		return
 	}
+	if input.CustomerAddress.Street == "" || input.CustomerAddress.City == "" || input.CustomerAddress.Country == "" {
+		writeError(w, http.StatusBadRequest, "customer_address with street, city, and country are required")
+		return
+	}
 
 	run, err := h.temporalClient.StartOrderWorkflow(r.Context(), input)
 	if err != nil {

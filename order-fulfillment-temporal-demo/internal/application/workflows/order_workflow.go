@@ -15,9 +15,10 @@ import (
 )
 
 type OrderWorkflowInput struct {
-	OrderID    string
-	CustomerID string
-	Items      []OrderItemInput
+	OrderID         string
+	CustomerID      string
+	Items           []OrderItemInput
+	CustomerAddress ShippingAddress `json:"customer_address"`
 }
 
 type OrderItemInput struct {
@@ -413,11 +414,7 @@ func OrderWorkflow(ctx workflow.Context, input OrderWorkflowInput) (*OrderWorkfl
 			case StepCreateShipment:
 				logger.Info("Starting ShipmentWorkflow", "orderID", input.OrderID)
 
-				shippingAddress := ShippingAddress{
-					Name: "Customer Name", Street: "123 Main St",
-					City: "New York", State: "NY",
-					PostalCode: "10001", Country: "USA", Phone: "555-0100",
-				}
+				shippingAddress := input.CustomerAddress
 				if state.ShippingAddress != nil {
 					shippingAddress = *state.ShippingAddress
 					logger.Info("Using updated shipping address", "city", shippingAddress.City)

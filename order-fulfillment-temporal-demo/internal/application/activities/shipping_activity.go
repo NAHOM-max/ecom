@@ -10,20 +10,23 @@ import (
 
 	"github.com/yourorg/order-fulfillment-temporal-demo/internal/infrastructure/idempotency"
 	"github.com/yourorg/order-fulfillment-temporal-demo/internal/infrastructure/messaging"
+	"github.com/yourorg/order-fulfillment-temporal-demo/internal/infrastructure/shipment"
 )
 
 type ShippingActivity struct {
-	failureRate float64
-	producer    messaging.EventProducer
-	idempotency idempotency.Store
+	failureRate    float64
+	shipmentClient shipment.ShipmentClient
+	producer       messaging.EventProducer
+	idempotency    idempotency.Store
 }
 
-func NewShippingActivity(failureRate float64, producer messaging.EventProducer, store idempotency.Store) *ShippingActivity {
-	return &ShippingActivity{failureRate: failureRate, producer: producer, idempotency: store}
+func NewShippingActivity(failureRate float64, shipmentClient shipment.ShipmentClient, producer messaging.EventProducer, store idempotency.Store) *ShippingActivity {
+	return &ShippingActivity{failureRate: failureRate, shipmentClient: shipmentClient, producer: producer, idempotency: store}
 }
 
 type CreateShipmentInput struct {
 	OrderID         string
+	OrderCreatedAt  time.Time
 	CustomerAddress ShippingAddress
 	Items           []ShippingItem
 	ShippingMethod  string
@@ -59,54 +62,44 @@ func (a *ShippingActivity) CreateShipment(ctx context.Context, input CreateShipm
 	logger := activity.GetLogger(ctx)
 	info := activity.GetInfo(ctx)
 
-	shipmentID := fmt.Sprintf("ship-%s", info.ActivityID)
-
 	idemKey := "CreateShipment:" + input.OrderID
 
 	if exists, _ := a.idempotency.Exists(ctx, idemKey); exists {
 		var cached CreateShipmentResult
 		if err := a.idempotency.Load(ctx, idemKey, &cached); err == nil {
 			logger.Info("CreateShipment: returning cached result (idempotent)",
-				"orderID", input.OrderID, "shipmentID", shipmentID)
+				"orderID", input.OrderID, "shipmentID", cached.ShipmentID)
 			return &cached, nil
 		}
 	}
 
-	actIDStr := info.ActivityID
-	if len(actIDStr) > 8 {
-		actIDStr = actIDStr[:8]
-	}
-	trackingNumber := fmt.Sprintf("TRK%d%s", time.Now().Unix(), actIDStr)
-
 	logger.Info("CreateShipment started",
 		"orderID", input.OrderID,
-		"shipmentID", shipmentID,
 		"shippingMethod", input.ShippingMethod,
 		"attempt", info.Attempt)
 
-	time.Sleep(time.Duration(150+rand.Intn(500)) * time.Millisecond)
-
-	if rand.Float64() < a.failureRate {
-		return nil, fmt.Errorf("shipping service unavailable: API timeout")
+	resp, err := a.shipmentClient.CreateShipment(ctx, shipment.CreateShipmentRequest{
+		OrderID:        input.OrderID,
+		OrderCreatedAt: input.OrderCreatedAt,
+		Address: shipment.AddressRequest{
+			Name:    input.CustomerAddress.Name,
+			Street:  input.CustomerAddress.Street,
+			City:    input.CustomerAddress.City,
+			Country: input.CustomerAddress.Country,
+		},
+	})
+	if err != nil {
+		logger.Error("CreateShipment failed - service error",
+			"orderID", input.OrderID, "attempt", info.Attempt, "error", err)
+		return nil, err
 	}
 
-	// Invalid address — business error, cache it.
-	if rand.Float64() < 0.02 {
-		result := &CreateShipmentResult{Success: false, Message: "Invalid shipping address: address not found"}
-		_ = a.idempotency.Save(ctx, idemKey, result)
-		return result, nil
-	}
-
-	carriers := []string{"FedEx", "UPS", "DHL", "USPS"}
-	carrier := carriers[rand.Intn(len(carriers))]
-	estimatedDate := time.Now().AddDate(0, 0, 3+rand.Intn(5)).Format("2006-01-02")
-
-	time.Sleep(time.Duration(100+rand.Intn(200)) * time.Millisecond)
+	estimatedDate := resp.DeliveryDate.Format("2006-01-02")
 
 	result := &CreateShipmentResult{
-		ShipmentID:     shipmentID,
-		TrackingNumber: trackingNumber,
-		Carrier:        carrier,
+		ShipmentID:     resp.ID,
+		TrackingNumber: resp.TrackingNumber,
+		Carrier:        resp.Status,
 		EstimatedDate:  estimatedDate,
 		Success:        true,
 		Message:        "Shipment created successfully",
@@ -117,20 +110,20 @@ func (a *ShippingActivity) CreateShipment(ctx context.Context, input CreateShipm
 	}
 
 	_ = a.producer.Publish(messaging.TopicShipments, messaging.Event{
-		EventID:   fmt.Sprintf("evt-%s", shipmentID),
+		EventID:   fmt.Sprintf("evt-%s", resp.ID),
 		EventType: messaging.EventShipmentCreated,
 		Timestamp: time.Now(),
 		OrderID:   input.OrderID,
 		Payload: messaging.ShipmentCreatedPayload{
-			ShipmentID:     shipmentID,
-			TrackingNumber: trackingNumber,
-			Carrier:        carrier,
+			ShipmentID:     resp.ID,
+			TrackingNumber: resp.TrackingNumber,
+			Carrier:        resp.Status,
 			EstimatedDate:  estimatedDate,
 		},
 	})
 
 	logger.Info("CreateShipment completed",
-		"orderID", input.OrderID, "shipmentID", shipmentID, "carrier", carrier)
+		"orderID", input.OrderID, "shipmentID", resp.ID, "trackingNumber", resp.TrackingNumber)
 	return result, nil
 }
 

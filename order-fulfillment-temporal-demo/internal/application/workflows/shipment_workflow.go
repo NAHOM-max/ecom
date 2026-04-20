@@ -19,13 +19,13 @@ type ShipmentWorkflowInput struct {
 }
 
 type ShippingAddress struct {
-	Name       string
-	Street     string
-	City       string
-	State      string
-	PostalCode string
-	Country    string
-	Phone      string
+	Name       string `json:"name"`
+	Street     string `json:"street"`
+	City       string `json:"city"`
+	State      string `json:"state"`
+	PostalCode string `json:"postal_code"`
+	Country    string `json:"country"`
+	Phone      string `json:"phone"`
 }
 
 type ShipmentItem struct {
@@ -47,15 +47,15 @@ type ShipmentWorkflowResult struct {
 
 // ShipmentWorkflowState tracks shipment workflow state
 type ShipmentWorkflowState struct {
-	OrderID           string
-	Status            string
-	ShipmentCreated   bool
-	ShipmentID        string
-	TrackingNumber    string
-	Carrier           string
-	ConfirmationSent  bool
-	CompletedSteps    []string
-	LastUpdated       time.Time
+	OrderID          string
+	Status           string
+	ShipmentCreated  bool
+	ShipmentID       string
+	TrackingNumber   string
+	Carrier          string
+	ConfirmationSent bool
+	CompletedSteps   []string
+	LastUpdated      time.Time
 }
 
 // ShipmentWorkflow orchestrates the shipping process as a child workflow
@@ -100,6 +100,7 @@ func ShipmentWorkflow(ctx workflow.Context, input ShipmentWorkflowInput) (*Shipm
 	var createResult activities.CreateShipmentResult
 	err := workflow.ExecuteActivity(ctx, "CreateShipment", activities.CreateShipmentInput{
 		OrderID:         input.OrderID,
+		OrderCreatedAt:  time.Now(),
 		CustomerAddress: convertToShippingAddress(input.CustomerAddress),
 		Items:           convertToShippingItems(input.Items),
 		ShippingMethod:  input.ShippingMethod,

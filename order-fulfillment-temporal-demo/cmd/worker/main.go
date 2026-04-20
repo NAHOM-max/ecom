@@ -18,6 +18,7 @@ import (
 	"github.com/yourorg/order-fulfillment-temporal-demo/internal/infrastructure/idempotency"
 	"github.com/yourorg/order-fulfillment-temporal-demo/internal/infrastructure/messaging"
 	"github.com/yourorg/order-fulfillment-temporal-demo/internal/infrastructure/payment"
+	"github.com/yourorg/order-fulfillment-temporal-demo/internal/infrastructure/shipment"
 	"github.com/yourorg/order-fulfillment-temporal-demo/internal/infrastructure/temporal"
 	"github.com/yourorg/order-fulfillment-temporal-demo/platform/observability"
 )
@@ -56,7 +57,8 @@ func main() {
 	inventoryActivity := activities.NewInventoryActivity(0.30, inventoryClient, producer, idemStore)
 	paymentClient := payment.NewHTTPPaymentClient(getEnv("PAYMENT_SERVICE_URL", "http://localhost:8082"))
 	paymentActivity := activities.NewPaymentActivity(paymentClient, producer, idemStore)
-	shippingActivity := activities.NewShippingActivity(1.0, producer, idemStore)
+	shipmentClient := shipment.NewHTTPShipmentClient(getEnv("SHIPMENT_SERVICE_URL", "http://localhost:8083"))
+	shippingActivity := activities.NewShippingActivity(1.0, shipmentClient, producer, idemStore)
 	eventActivity := activities.NewPublishEventActivity(producer)
 	fraudActivity := activities.NewFraudCheckActivity(0.10, idemStore)
 
