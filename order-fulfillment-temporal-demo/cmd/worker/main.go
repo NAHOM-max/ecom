@@ -56,7 +56,7 @@ func main() {
 	inventoryActivity := activities.NewInventoryActivity(0.30, inventoryClient, producer, idemStore)
 	paymentClient := payment.NewHTTPPaymentClient(getEnv("PAYMENT_SERVICE_URL", "http://localhost:8082"))
 	paymentActivity := activities.NewPaymentActivity(paymentClient, producer, idemStore)
-	shippingActivity := activities.NewShippingActivity(0.30, producer, idemStore)
+	shippingActivity := activities.NewShippingActivity(1.0, producer, idemStore)
 	eventActivity := activities.NewPublishEventActivity(producer)
 	fraudActivity := activities.NewFraudCheckActivity(0.10, idemStore)
 

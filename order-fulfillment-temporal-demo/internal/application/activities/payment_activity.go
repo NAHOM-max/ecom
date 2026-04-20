@@ -2,8 +2,6 @@ package activities
 
 import (
 	"context"
-	"fmt"
-	"time"
 
 	"go.temporal.io/sdk/activity"
 
@@ -102,14 +100,22 @@ func (a *PaymentActivity) RefundPayment(ctx context.Context, paymentID string) e
 		return nil
 	}
 
-	refundID := fmt.Sprintf("ref-%s-%d", paymentID, time.Now().Unix())
-	logger.Info("RefundPayment started", "paymentID", paymentID, "refundID", refundID, "attempt", info.Attempt)
+	logger.Info("RefundPayment started", "paymentID", paymentID, "attempt", info.Attempt)
 
-	if err := a.idempotency.Save(ctx, idemKey, map[string]string{"refund_id": refundID, "status": "refunded"}); err != nil {
+	resp, err := a.paymentClient.RefundPayment(ctx, payment.RefundPaymentRequest{
+		PaymentID: paymentID,
+	})
+	if err != nil {
+		logger.Error("RefundPayment failed - service error",
+			"paymentID", paymentID, "attempt", info.Attempt, "error", err)
+		return err
+	}
+
+	if err := a.idempotency.Save(ctx, idemKey, map[string]string{"payment_id": resp.PaymentID, "status": resp.Status}); err != nil {
 		logger.Warn("RefundPayment: failed to save idempotency record", "error", err)
 	}
 
-	logger.Info("RefundPayment completed", "paymentID", paymentID, "refundID", refundID)
+	logger.Info("RefundPayment completed", "paymentID", paymentID, "status", resp.Status)
 	return nil
 }
 

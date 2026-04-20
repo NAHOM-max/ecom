@@ -13,6 +13,7 @@ import (
 // Swap HTTPPaymentClient for a stub in tests without touching activity code.
 type PaymentClient interface {
 	InitiatePayment(ctx context.Context, req InitiatePaymentRequest) (*InitiatePaymentResponse, error)
+	RefundPayment(ctx context.Context, req RefundPaymentRequest) (*RefundPaymentResponse, error)
 }
 
 // InitiatePaymentRequest is the body sent to the payment microservice.
@@ -43,8 +44,58 @@ func NewHTTPPaymentClient(baseURL string) *HTTPPaymentClient {
 	}
 }
 
+// RefundPaymentRequest is the body sent to POST /payments/refund.
+type RefundPaymentRequest struct {
+	PaymentID string `json:"payment_id"`
+}
+
+// RefundPaymentResponse is returned on HTTP 200.
+type RefundPaymentResponse struct {
+	PaymentID string `json:"payment_id"`
+	Status    string `json:"status"`
+}
+
 type errorResponse struct {
 	Error string `json:"error"`
+}
+
+func (c *HTTPPaymentClient) RefundPayment(ctx context.Context, req RefundPaymentRequest) (*RefundPaymentResponse, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("payment client: marshal refund request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/payments/refund", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("payment client: build refund request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.client.Do(httpReq)
+	if err != nil {
+		// Network error — retryable by Temporal
+		return nil, fmt.Errorf("payment client: refund request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		var errResp errorResponse
+		_ = json.NewDecoder(resp.Body).Decode(&errResp)
+		if errResp.Error != "" {
+			return nil, fmt.Errorf("payment service refund error: %s", errResp.Error)
+		}
+		return nil, fmt.Errorf("payment service refund error: status %d", resp.StatusCode)
+	}
+
+	var success RefundPaymentResponse
+	if err := json.NewDecoder(resp.Body).Decode(&success); err != nil {
+		return nil, fmt.Errorf("payment client: decode refund response: %w", err)
+	}
+	if success.PaymentID == "" {
+		return nil, fmt.Errorf("payment client: missing payment_id in refund response")
+	}
+
+	return &success, nil
 }
 
 func (c *HTTPPaymentClient) InitiatePayment(ctx context.Context, req InitiatePaymentRequest) (*InitiatePaymentResponse, error) {
