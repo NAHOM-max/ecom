@@ -22,6 +22,7 @@ type CreateShipmentRequest struct {
 	OrderID        string         `json:"order_id"`
 	OrderCreatedAt time.Time      `json:"order_created_at"`
 	Address        AddressRequest `json:"address"`
+	WorkflowID     string         `json:"workflow_id"`
 }
 
 type AddressRequest struct {

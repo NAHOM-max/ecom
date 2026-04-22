@@ -81,6 +81,7 @@ func (a *ShippingActivity) CreateShipment(ctx context.Context, input CreateShipm
 	resp, err := a.shipmentClient.CreateShipment(ctx, shipment.CreateShipmentRequest{
 		OrderID:        input.OrderID,
 		OrderCreatedAt: input.OrderCreatedAt,
+		WorkflowID:     info.WorkflowExecution.ID,
 		Address: shipment.AddressRequest{
 			Name:    input.CustomerAddress.Name,
 			Street:  input.CustomerAddress.Street,

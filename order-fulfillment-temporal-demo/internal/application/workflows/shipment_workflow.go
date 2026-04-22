@@ -58,6 +58,12 @@ type ShipmentWorkflowState struct {
 	LastUpdated      time.Time
 }
 
+// DeliveryConfirmedSignal is the payload of the "DeliveryConfirmed" signal
+// sent by the shipment microservice when a delivery outcome is known.
+type DeliveryConfirmedSignal struct {
+	ShipmentID string `json:"shipment_id"`
+}
+
 // ShipmentWorkflow orchestrates the shipping process as a child workflow
 // Lifecycle:
 // 1. Create shipment with carrier
@@ -140,23 +146,48 @@ func ShipmentWorkflow(ctx workflow.Context, input ShipmentWorkflowInput) (*Shipm
 		"trackingNumber", createResult.TrackingNumber,
 		"carrier", createResult.Carrier)
 
-	// Step 2: Wait for Simulated Shipping Confirmation
-	logger.Info("Step 2: Waiting for shipping confirmation",
+	// Step 2: Wait for Delivery Confirmation Signal
+	logger.Info("Step 2: Waiting for delivery confirmation signal",
 		"orderID", input.OrderID,
 		"shipmentID", state.ShipmentID)
 	state.Status = "AWAITING_CONFIRMATION"
 	state.LastUpdated = workflow.Now(ctx)
 
-	// Simulate waiting for carrier confirmation (2-5 seconds)
-	confirmationDelay := time.Second * 3
-	err = workflow.Sleep(ctx, confirmationDelay)
-	if err != nil {
-		logger.Error("Workflow cancelled during confirmation wait", "error", err)
-		return &ShipmentWorkflowResult{
-			Success: false,
-			Message: "Shipment workflow cancelled",
-		}, err
+	deliverySignalChan := workflow.GetSignalChannel(ctx, "DeliveryConfirmed")
+
+	var deliverySignal DeliveryConfirmedSignal
+
+	// Block until a DeliveryConfirmed signal arrives for this shipment.
+	// Signals for other shipment IDs are discarded — only the matching one
+	// advances the workflow. This loop is deterministic and replay-safe.
+	for {
+		deliverySignalChan.Receive(ctx, &deliverySignal)
+
+		if deliverySignal.ShipmentID != state.ShipmentID {
+			logger.Warn("DeliveryConfirmed signal for unknown shipment, ignoring",
+				"expected", state.ShipmentID,
+				"got", deliverySignal.ShipmentID)
+			continue
+		}
+
+		logger.Info("DeliveryConfirmed signal received",
+			"orderID", input.OrderID,
+			"shipmentID", state.ShipmentID,
+			"status", "Signal successfully delivered")
+		break
 	}
+
+	// if deliverySignal.Status == "FAILED" {
+	// 	logger.Error("Delivery confirmation failed",
+	// 		"orderID", input.OrderID,
+	// 		"shipmentID", state.ShipmentID)
+	// 	state.Status = "FAILED"
+	// 	state.LastUpdated = workflow.Now(ctx)
+	// 	return &ShipmentWorkflowResult{
+	// 		Success: false,
+	// 		Message: fmt.Sprintf("Delivery failed for shipment %s", state.ShipmentID),
+	// 	}, fmt.Errorf("delivery failed for shipment %s", state.ShipmentID)
+	// }
 
 	state.ConfirmationSent = true
 	state.CompletedSteps = append(state.CompletedSteps, "confirmation_received")
