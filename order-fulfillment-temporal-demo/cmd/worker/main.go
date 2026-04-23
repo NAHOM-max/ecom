@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -16,7 +15,6 @@ import (
 	"github.com/yourorg/order-fulfillment-temporal-demo/internal/application/workflows"
 	infrahttp "github.com/yourorg/order-fulfillment-temporal-demo/internal/infrastructure/http"
 	"github.com/yourorg/order-fulfillment-temporal-demo/internal/infrastructure/idempotency"
-	"github.com/yourorg/order-fulfillment-temporal-demo/internal/infrastructure/messaging"
 	"github.com/yourorg/order-fulfillment-temporal-demo/internal/infrastructure/payment"
 	"github.com/yourorg/order-fulfillment-temporal-demo/internal/infrastructure/shipment"
 	"github.com/yourorg/order-fulfillment-temporal-demo/internal/infrastructure/temporal"
@@ -45,21 +43,16 @@ func main() {
 	}
 	defer tc.Close()
 
-	// --- Event producer ---
-	producer := buildProducer()
-	defer producer.Close()
-
 	// --- Idempotency store (shared across all activities) ---
 	idemStore := idempotency.NewMemoryStore()
 
 	// --- Activities ---
 	inventoryClient := infrahttp.NewInventoryClient()
-	inventoryActivity := activities.NewInventoryActivity(0.30, inventoryClient, producer, idemStore)
+	inventoryActivity := activities.NewInventoryActivity(0.30, inventoryClient, idemStore)
 	paymentClient := payment.NewHTTPPaymentClient(getEnv("PAYMENT_SERVICE_URL", "http://localhost:8082"))
-	paymentActivity := activities.NewPaymentActivity(paymentClient, producer, idemStore)
+	paymentActivity := activities.NewPaymentActivity(paymentClient, idemStore)
 	shipmentClient := shipment.NewHTTPShipmentClient(getEnv("SHIPMENT_SERVICE_URL", "http://localhost:8083"))
-	shippingActivity := activities.NewShippingActivity(1.0, shipmentClient, producer, idemStore)
-	eventActivity := activities.NewPublishEventActivity(producer)
+	shippingActivity := activities.NewShippingActivity(1.0, shipmentClient, idemStore)
 	fraudActivity := activities.NewFraudCheckActivity(0.10, idemStore)
 
 	// --- Metrics server (worker exposes /metrics on a separate port) ---
@@ -99,7 +92,6 @@ func main() {
 	w.RegisterActivity(shippingActivity.CancelShipment)
 	w.RegisterActivity(shippingActivity.TrackShipment)
 
-	w.RegisterActivity(eventActivity.Publish)
 	w.RegisterActivity(fraudActivity.FraudCheck)
 
 	log.Println("Registered 11 activities")
@@ -115,22 +107,6 @@ func main() {
 
 	log.Println("Shutting down worker...")
 	w.Stop()
-}
-
-func buildProducer() messaging.EventProducer {
-	brokers := getEnv("KAFKA_BROKERS", "")
-	if brokers == "" {
-		log.Println("KAFKA_BROKERS not set — using no-op event producer")
-		return &messaging.NoopProducer{}
-	}
-	p, err := messaging.NewKafkaProducer(messaging.KafkaConfig{
-		Brokers: strings.Split(brokers, ","),
-	})
-	if err != nil {
-		log.Printf("Failed to connect to Kafka (%v) — falling back to no-op producer", err)
-		return &messaging.NoopProducer{}
-	}
-	return p
 }
 
 func getEnv(key, defaultValue string) string {

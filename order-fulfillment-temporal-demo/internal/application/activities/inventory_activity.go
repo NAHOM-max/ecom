@@ -10,18 +10,17 @@ import (
 
 	"github.com/yourorg/order-fulfillment-temporal-demo/internal/domain"
 	"github.com/yourorg/order-fulfillment-temporal-demo/internal/infrastructure/idempotency"
-	"github.com/yourorg/order-fulfillment-temporal-demo/internal/infrastructure/messaging"
 )
 
 type InventoryActivity struct {
 	failureRate      float64
 	inventoryService domain.InventoryService
-	producer         messaging.EventProducer
-	idempotency      idempotency.Store
+	//producer         messaging.EventProducer
+	idempotency idempotency.Store
 }
 
-func NewInventoryActivity(failureRate float64, inventoryService domain.InventoryService, producer messaging.EventProducer, store idempotency.Store) *InventoryActivity {
-	return &InventoryActivity{failureRate: failureRate, inventoryService: inventoryService, producer: producer, idempotency: store}
+func NewInventoryActivity(failureRate float64, inventoryService domain.InventoryService, store idempotency.Store) *InventoryActivity {
+	return &InventoryActivity{failureRate: failureRate, inventoryService: inventoryService, idempotency: store}
 }
 
 type ReserveInventoryInput struct {
@@ -101,17 +100,6 @@ func (a *InventoryActivity) ReserveInventory(ctx context.Context, input ReserveI
 	if err := a.idempotency.Save(ctx, idemKey, result); err != nil {
 		logger.Warn("ReserveInventory: failed to save idempotency record", "error", err)
 	}
-
-	_ = a.producer.Publish(messaging.TopicInventory, messaging.Event{
-		EventID:   fmt.Sprintf("evt-%s", result.ReservationID),
-		EventType: messaging.EventInventoryReserved,
-		Timestamp: time.Now(),
-		OrderID:   input.OrderID,
-		Payload: messaging.InventoryReservedPayload{
-			ReservationID: result.ReservationID,
-			ItemCount:     len(input.Items),
-		},
-	})
 
 	logger.Info("ReserveInventory completed",
 		"orderID", input.OrderID, "reservationID", result.ReservationID)

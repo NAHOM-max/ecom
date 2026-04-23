@@ -9,19 +9,17 @@ import (
 	"go.temporal.io/sdk/activity"
 
 	"github.com/yourorg/order-fulfillment-temporal-demo/internal/infrastructure/idempotency"
-	"github.com/yourorg/order-fulfillment-temporal-demo/internal/infrastructure/messaging"
 	"github.com/yourorg/order-fulfillment-temporal-demo/internal/infrastructure/shipment"
 )
 
 type ShippingActivity struct {
 	failureRate    float64
 	shipmentClient shipment.ShipmentClient
-	producer       messaging.EventProducer
 	idempotency    idempotency.Store
 }
 
-func NewShippingActivity(failureRate float64, shipmentClient shipment.ShipmentClient, producer messaging.EventProducer, store idempotency.Store) *ShippingActivity {
-	return &ShippingActivity{failureRate: failureRate, shipmentClient: shipmentClient, producer: producer, idempotency: store}
+func NewShippingActivity(failureRate float64, shipmentClient shipment.ShipmentClient, store idempotency.Store) *ShippingActivity {
+	return &ShippingActivity{failureRate: failureRate, shipmentClient: shipmentClient, idempotency: store}
 }
 
 type CreateShipmentInput struct {
@@ -109,19 +107,6 @@ func (a *ShippingActivity) CreateShipment(ctx context.Context, input CreateShipm
 	if err := a.idempotency.Save(ctx, idemKey, result); err != nil {
 		logger.Warn("CreateShipment: failed to save idempotency record", "error", err)
 	}
-
-	_ = a.producer.Publish(messaging.TopicShipments, messaging.Event{
-		EventID:   fmt.Sprintf("evt-%s", resp.ID),
-		EventType: messaging.EventShipmentCreated,
-		Timestamp: time.Now(),
-		OrderID:   input.OrderID,
-		Payload: messaging.ShipmentCreatedPayload{
-			ShipmentID:     resp.ID,
-			TrackingNumber: resp.TrackingNumber,
-			Carrier:        resp.Status,
-			EstimatedDate:  estimatedDate,
-		},
-	})
 
 	logger.Info("CreateShipment completed",
 		"orderID", input.OrderID, "shipmentID", resp.ID, "trackingNumber", resp.TrackingNumber)

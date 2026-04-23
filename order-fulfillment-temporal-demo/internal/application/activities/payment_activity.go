@@ -6,18 +6,16 @@ import (
 	"go.temporal.io/sdk/activity"
 
 	"github.com/yourorg/order-fulfillment-temporal-demo/internal/infrastructure/idempotency"
-	"github.com/yourorg/order-fulfillment-temporal-demo/internal/infrastructure/messaging"
 	"github.com/yourorg/order-fulfillment-temporal-demo/internal/infrastructure/payment"
 )
 
 type PaymentActivity struct {
 	paymentClient payment.PaymentClient
-	producer      messaging.EventProducer
 	idempotency   idempotency.Store
 }
 
-func NewPaymentActivity(client payment.PaymentClient, producer messaging.EventProducer, store idempotency.Store) *PaymentActivity {
-	return &PaymentActivity{paymentClient: client, producer: producer, idempotency: store}
+func NewPaymentActivity(client payment.PaymentClient, store idempotency.Store) *PaymentActivity {
+	return &PaymentActivity{paymentClient: client, idempotency: store}
 }
 
 type ChargePaymentInput struct {
